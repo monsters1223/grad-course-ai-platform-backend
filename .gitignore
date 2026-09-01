@@ -1,0 +1,37 @@
+# ===== 密钥与环境变量（绝不提交，泄露即事故）=====
+.env
+*.env
+backend/.env
+!.env.example
+
+# ===== 数据库文件（本地数据，不进版本库）=====
+*.db
+*.sqlite
+*.sqlite3
+app.db
+
+# ===== 运行时日志 =====
+*.log
+server.log
+
+# ===== 本地调试临时文件（curl 测试用的 body）=====
+test_*.json
+
+# ===== Python 缓存与虚拟环境 =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+venv/
+.venv/
+env/
+
+# ===== 编辑器与系统文件 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 注意：uploads/ 目录（课程视频与课件，约 4MB）保留在版本库中，
+# 因为 seed_courses.py 与 Docker 构建都依赖这些文件，
+# 若排除会导致搭档 clone 后课程资源缺失、镜像构建失败。

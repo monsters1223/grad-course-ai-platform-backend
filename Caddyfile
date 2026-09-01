@@ -1,0 +1,10 @@
+# Caddy 反向代理 + 自动 HTTPS（Let's Encrypt 免费证书）
+# 部署时把 your-domain.com 换成你的域名，并确认该域名的 DNS A 记录已指向本服务器公网 IP。
+# 若暂无域名，可临时改为 :80 走纯 HTTP（不安全，仅演示用）：
+#     :80 {
+#         reverse_proxy web:8000
+#     }
+your-domain.com {
+    # 可选：上传文件较大时调高
+    reverse_proxy web:8000
+}

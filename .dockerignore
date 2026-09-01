@@ -1,0 +1,8 @@
+# 构建镜像时排除（避免把密钥、本地数据库、缓存打进镜像）
+**/__pycache__
+**/*.pyc
+**/*.pyo
+backend/app.db
+backend/.env
+.git
+.gitignore

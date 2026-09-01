@@ -1,0 +1,61 @@
+# 研究生通识课 AI 教育平台 —— 一键部署编排
+# 用法：在 site/ 目录下执行  docker compose up -d --build
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-gradai}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-changeme}
+      POSTGRES_DB: ${PG_DB:-grad_ai}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-gradai} -d ${PG_DB:-grad_ai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: .
+    restart: unless-stopped
+    environment:
+      # 配了 DATABASE_URL 就连 PostgreSQL；没配就回落 SQLite
+      DATABASE_URL: ${DATABASE_URL:-}
+      SQLITE_PATH: /app/data/app.db
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    env_file:
+      - .env
+    volumes:
+      - app-data:/app/data
+      # 容器内 Python 的 cwd 是 /app，pydantic-settings 读的是 /app/.env
+      # 必须挂到 /app/.env（不是 /app/backend/.env），否则 OpenMAIC 访问码读不到
+      - ./backend/.env:/app/.env:ro
+    # 本地开发调试：把 8000 端口发布到主机（curl localhost:8000 可达）。
+    # 部署到校内服务器时去掉这两行，让 caddy 80/443 唯一对外。
+    ports:
+      - "8000:8000"
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+
+volumes:
+  app-data:
+  pg-data:
+  caddy-data:
+  caddy-config:

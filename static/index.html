@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>研究生通识课 AI 教育平台 · 学生端</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700;800&family=Nunito:wght@600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+<!-- ============ 登录（仅学生） ============ -->
+<div id="login" class="login-wrap">
+  <div class="login-card">
+    <div class="login-left">
+      <div class="brand">
+        <div class="b-mark">🎓</div>
+        <div>
+          <b>研究生通识课 AI 教育平台</b>
+          <div class="b-sub">多智能体 · 主动学习</div>
+        </div>
+      </div>
+      <h1 style="font-size:26px;margin:18px 0 10px">让通识课<br>主动学起来</h1>
+      <p style="opacity:.9;font-size:14px;line-height:1.7">
+        课程中心 · AI 课堂（OpenMAIC）· 课程讨论 · 班级群聊 · 学习小组 · 课堂签到，一站式研究生通识课学习空间。
+      </p>
+      <div class="b-tags">
+        <span>📚 课程中心</span><span>🤖 AI 课堂</span><span>💬 群聊</span><span>✅ 签到</span>
+      </div>
+    </div>
+    <div class="login-right">
+      <h2 style="margin-bottom:6px">学生登录</h2>
+      <p class="h-sub" style="margin-bottom:18px">使用学生账号进入学习空间</p>
+      <div id="loginForm">
+        <div class="field"><label>学号 / 用户名</label><input id="li-user" placeholder="如 student" /></div>
+        <div class="field"><label>密码</label><input id="li-pass" type="password" placeholder="••••••" /></div>
+        <button class="btn" style="width:100%;margin-top:6px" onclick="doLogin()">登录进入</button>
+        <p id="li-err" class="muted" style="color:var(--danger);min-height:18px;font-size:12px;margin-top:8px"></p>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:14px;text-align:center">
+        <span style="color:var(--text-2)">账号由管理员统一下发</span>
+      </p>
+      <p class="muted" style="font-size:11px;margin-top:6px;text-align:center">演示账号：student01 / 123456</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 主应用 ============ -->
+<div id="app" class="app" style="display:none">
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="mark">🎓</div>
+      <div><b>通识课 AI 平台</b><div class="sub">学生端</div></div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="nav-card">
+      <b>AI 课堂</b>
+      <div style="font-size:12px;color:var(--text-2);margin-top:4px">接入 OpenMAIC 多智能体</div>
+      <button class="btn ai" style="width:100%;margin-top:10px;padding:8px" onclick="navigate('aichat')">进入对话</button>
+    </div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <div class="topbar">
+      <div class="search"><span>🔍</span><input placeholder="搜索课程、资料、讨论…" /></div>
+      <div class="top-actions">
+        <div class="bell">🔔<span class="dot"></span></div>
+        <div class="avatar" id="topAvatar" style="cursor:pointer" onclick="logout()">依</div>
+      </div>
+    </div>
+    <div class="content" id="view"></div>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
