@@ -36,21 +36,23 @@ def _load_env_file():
 _load_env_file()
 
 Base.metadata.create_all(bind=engine)
-# 兼容旧库：补齐 ai_classroom_url 列
-# 注意：不能用 PRAGMA table_info() —— 那是 SQLite 专属语法，PostgreSQL 会报语法错误
-# 用 SQLAlchemy 的 inspect() API 跨数据库通用
+# 兼容旧库：补齐新增列（用 SQLAlchemy inspect 跨数据库通用，不能用 PRAGMA —— 那是 SQLite 专属）
 _inspector = inspect(engine)
 _existing_cols = [c["name"] for c in _inspector.get_columns("courses")]
-if "ai_classroom_url" not in _existing_cols:
-    with engine.connect() as _conn:
+with engine.connect() as _conn:
+    if "ai_classroom_url" not in _existing_cols:
         _conn.execute(text("ALTER TABLE courses ADD COLUMN ai_classroom_url TEXT"))
-        _conn.commit()
+    if "teacher_id" not in _existing_cols:
+        _conn.execute(text("ALTER TABLE courses ADD COLUMN teacher_id INTEGER"))
+    _conn.commit()
 
 app = FastAPI(title="研究生通识课AI教育平台-学生端")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # 前端用 Bearer Token 鉴权（非 cookie），无需凭据；
+    # 通配符 origins 不能与 allow_credentials=True 同用（浏览器拒绝），故置 False。
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -74,4 +76,5 @@ app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)

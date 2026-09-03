@@ -28,6 +28,7 @@ class Course(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(128), nullable=False)
     teacher = Column(String(64))
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     cover = Column(String(16), default="📘")
     category = Column(String(32), default="通识课")
     desc = Column(Text)
@@ -132,3 +133,39 @@ class SignIn(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="signins")
+
+
+class Announcement(Base):
+    __tablename__ = "announcements"
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)  # 空=全局公告
+    author_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String(128), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StudyLog(Base):
+    """学情：单用户·单课程·单章节的视频观看记录（按 user+course+section 唯一）。"""
+    __tablename__ = "study_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    section_index = Column(Integer, default=0)        # 章节在课程 sections 中的序号
+    section_title = Column(String(128))
+    progress = Column(Integer, default=0)             # 视频完成百分比 0-100（取最大值）
+    watch_seconds = Column(Integer, default=0)        # 已观看秒数（取最大播放位置近似）
+    last_at = Column(DateTime, default=datetime.utcnow)
+
+
+class QuizResult(Base):
+    """学情：单用户·单课程·单份章节测验的成绩（按 user+course+quiz 唯一）。"""
+    __tablename__ = "quiz_results"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    quiz_index = Column(Integer, default=0)           # 测验在课程 sections 中的序号
+    quiz_title = Column(String(128))
+    score = Column(Integer, default=0)                # 答对题数
+    total = Column(Integer, default=0)                # 总题数
+    submitted_at = Column(DateTime, default=datetime.utcnow)

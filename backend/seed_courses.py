@@ -12,28 +12,28 @@
 """
 from core.database import SessionLocal, Base, engine
 import models  # noqa: F401
-from core.security import hash_password
+from sqlalchemy import text, inspect
 from models import (
     Course, Section, Discussion, Homework, ChatRoom, ChatMember,
     StudyGroup, Message, User,
 )
 
 
+def _migrate():
+    """兼容旧库：补齐新增列（用 SQLAlchemy inspect 跨数据库通用，不能用 PRAGMA —— 那是 SQLite 专属）。"""
+    _ins = inspect(engine)
+    cols = [c["name"] for c in _ins.get_columns("courses")]
+    with engine.connect() as conn:
+        if "teacher_id" not in cols:
+            conn.execute(text("ALTER TABLE courses ADD COLUMN teacher_id INTEGER"))
+        conn.commit()
+
+
+
+
 def _first_student_id(db):
     u = db.query(User).filter(User.role == "student").first()
-    if u:
-        return u.id
-    # 新数据库无学生用户：seed 后续步骤（建班级群/StudyGroup）的 owner_id 都是 NOT NULL，
-    # 必须先有一个用户可指，否则会触发 IntegrityError。这里幂等创建一个 demo 用户兜底。
-    demo = User(
-        username="demo_student",
-        name="演示学生",
-        password_hash=hash_password("demo123"),
-        role="student",
-    )
-    db.add(demo)
-    db.flush()
-    return demo.id
+    return u.id if u else None
 
 
 def _patch_content(db):
@@ -63,7 +63,8 @@ def _sync_course_content(db):
     左侧课（数据科学导论）内容完整；右侧课（科技伦理与人工智能）仅留壳。"""
     c1 = db.query(Course).filter_by(title="数据科学导论").first()
     c2 = db.query(Course).filter_by(title="科技伦理与人工智能").first()
-    if not c1 or not c2:
+    c3 = db.query(Course).filter_by(title="学术写作与规范").first()
+    if not c1:
         return
 
     # 清空左侧课旧内容并重建
@@ -92,35 +93,96 @@ def _sync_course_content(db):
                     desc="使用提供的数据集完成清洗并提交报告。", due="2026-09-10"))
     c1.progress = 60
 
-    # 右侧课仅留壳：删除所有章节/作业/讨论
-    db.query(Section).filter_by(course_id=c2.id).delete()
-    db.query(Homework).filter_by(course_id=c2.id).delete()
-    db.query(Discussion).filter_by(course_id=c2.id).delete()
-    c2.progress = 0
+    # 右侧课（科技伦理与人工智能）仅留壳
+    if c2:
+        db.query(Section).filter_by(course_id=c2.id).delete()
+        db.query(Homework).filter_by(course_id=c2.id).delete()
+        db.query(Discussion).filter_by(course_id=c2.id).delete()
+        c2.progress = 0
+
+    # 第三门课：学术写作与规范（完整示例）
+    if c3:
+        db.query(Section).filter_by(course_id=c3.id).delete()
+        db.query(Homework).filter_by(course_id=c3.id).delete()
+        db.query(Discussion).filter_by(course_id=c3.id).delete()
+        db.add_all([
+            Section(course_id=c3.id, title="第1章 文献检索与综述", stype="video",
+                    content="/files/ch1.mp4", position=1),
+            Section(course_id=c3.id, title="第1章课件·文献检索", stype="doc",
+                    content="/files/slide1.html", position=2),
+            Section(course_id=c3.id, title="第2章 引用格式与学术诚信", stype="video",
+                    content="/files/ch2.mp4", position=3),
+            Section(course_id=c3.id, title="第2章课件·引用规范", stype="doc",
+                    content="/files/slide2.html", position=4),
+            Section(course_id=c3.id, title="章节测验1", stype="quiz",
+                    content="5道单选题，涵盖文献检索与引用规范，限时15分钟。", position=5),
+        ])
+        db.add(Discussion(course_id=c3.id, user_id=_first_student_id(db) or 0,
+                          content="老师，间接引用和直接引用在正文标注上有什么区别？"))
+        db.add(Homework(course_id=c3.id, title="作业1：文献综述初稿",
+                        desc="围绕自选课题完成1500字综述，使用课程引用格式。", due="2026-09-20"))
+        c3.progress = 0
 
     db.commit()
-    print("课程内容已幂等同步：左侧课完整，右侧课为空壳。")
+    print("课程内容已幂等同步：数据科学导论完整，科技伦理/学术写作为示例壳。")
+
+
+def _ensure_demo_teacher(db):
+    """确保存在演示老师 teacher01/123456，返回其 id。"""
+    from core.security import hash_password
+    t = db.query(User).filter(User.username == "teacher01").first()
+    if not t:
+        t = User(username="teacher01", name="演示老师",
+                 password_hash=hash_password("123456"),
+                 avatar="师", role="teacher", email="teacher01@demo.edu")
+        db.add(t)
+        db.flush()
+        print("已创建演示老师：teacher01 / 123456")
+    else:
+        t.role = "teacher"
+    return t.id
+
+
+def _ensure_demo_student(db):
+    """确保至少存在一个演示学生 student01/123456（建群/小组需要 owner）。"""
+    from core.security import hash_password
+    s = db.query(User).filter(User.username == "student01").first()
+    if not s:
+        s = User(username="student01", name="演示同学",
+                 password_hash=hash_password("123456"),
+                 avatar="学", role="student", email="student01@demo.edu")
+        db.add(s)
+        db.flush()
+        print("已创建演示学生：student01 / 123456")
+    return s.id
 
 
 def seed():
     Base.metadata.create_all(bind=engine)
+    _migrate()
     db = SessionLocal()
     try:
+        teacher_id = _ensure_demo_teacher(db)
+        _ensure_demo_student(db)
         # ---- 首次：建课程、班级群、学习小组 ----
         if db.query(Course).count() == 0:
-            c1 = Course(title="数据科学导论", teacher="李教授", cover="📊",
-                        category="理工通识",
+            c1 = Course(title="数据科学导论", teacher="李教授", teacher_id=teacher_id,
+                        cover="📊", category="理工通识",
                         desc="面向研究生的数据科学通识课，涵盖统计、可视化与机器学习基础。",
                         progress=60)
-            c2 = Course(title="科技伦理与人工智能", teacher="王老师", cover="🤖",
-                        category="人文通识",
+            c2 = Course(title="科技伦理与人工智能", teacher="王老师", teacher_id=teacher_id,
+                        cover="🤖", category="人文通识",
                         desc="探讨AI发展中的伦理、隐私与社会影响。",
                         progress=0)
-            db.add_all([c1, c2])
+            c3 = Course(title="学术写作与规范", teacher="王怀安", teacher_id=teacher_id,
+                        cover="✍️", category="人文通识",
+                        desc="面向研究生的学术写作训练，涵盖文献检索、引用规范与论证结构。",
+                        progress=0)
+            db.add_all([c1, c2, c3])
             db.flush()
 
             # 班级群
-            for c in (c1, c2):
+            for c in (c1, c2, c3):
                 room = ChatRoom(rtype="class", name=f"{c.title}·班级群",
                                 course_id=c.id, owner_id=_first_student_id(db))
                 db.add(room)
@@ -146,6 +208,25 @@ def seed():
             print("首次：课程、班级群与学习小组已创建。")
         else:
             print("课程已存在，跳过课程创建。")
+
+        # ---- 幂等补充：若旧库只有 2 门课，补充第三门（学术写作与规范）----
+        if db.query(Course).filter_by(title="学术写作与规范").first() is None:
+            c3n = Course(title="学术写作与规范", teacher="王怀安", teacher_id=teacher_id,
+                         cover="✍️", category="人文通识",
+                         desc="面向研究生的学术写作训练，涵盖文献检索、引用规范与论证结构。",
+                         progress=0)
+            db.add(c3n)
+            db.flush()
+            room3 = ChatRoom(rtype="class", name=f"{c3n.title}·班级群",
+                             course_id=c3n.id, owner_id=_first_student_id(db))
+            db.add(room3)
+            db.flush()
+            sid = _first_student_id(db)
+            if sid:
+                db.add(Message(room_id=room3.id, user_id=sid, mtype="text",
+                               content=f"欢迎大家来到《{c3n.title}》班级群！"))
+            db.commit()
+            print("已补充第三门课：学术写作与规范（含班级群）。")
 
         # ---- 幂等同步：章节/作业/讨论 ----
         _sync_course_content(db)
