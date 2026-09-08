@@ -28,9 +28,10 @@ services:
       - .env
     volumes:
       - app-data:/app/data
-      # 容器内 Python 的 cwd 是 /app，pydantic-settings 读的是 /app/.env
-      # 必须挂到 /app/.env（不是 /app/backend/.env），否则 OpenMAIC 访问码读不到
-      - ./backend/.env:/app/.env:ro
+      # 容器内 Python 的 cwd 实际是 /app/backend（见 docker inspect WorkingDir），
+      # pydantic-settings 的 env_file=".env" 与 main.py 的 _load_env_file() 都读 /app/backend/.env。
+      # 必须把 host 的 backend/.env 挂到这里，否则 OpenMAIC 访问码读不到（导致 501）。
+      - ./backend/.env:/app/backend/.env:ro
     # 本地开发调试：把 8000 端口发布到主机（curl localhost:8000 可达）。
     # 部署到校内服务器时去掉这两行，让 caddy 80/443 唯一对外。
     ports:

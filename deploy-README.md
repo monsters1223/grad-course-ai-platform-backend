@@ -30,15 +30,24 @@ scp -r site/ user@你的服务器IP:~/site
 
 ## 三、配置环境变量
 
+本项目有**两个 `.env`，作用不同，别填错文件**：
+
 ```bash
 cd ~/site
 cp .env.example .env
-nano .env          # 至少填 OPENMAIC_ACCESS_CODE 和 JWT_SECRET
+nano .env                # 根 .env：PG_USER / PG_PASSWORD / PG_DB / DATABASE_URL / JWT_SECRET
+nano backend/.env        # 应用 .env：OPENMAIC_BASE_URL / OPENMAIC_ACCESS_CODE
 ```
 
-- `OPENMAIC_ACCESS_CODE`：你在 https://open.maic.chat 拿到的访问码（`sk-` 开头）。
-- `JWT_SECRET`：执行 `openssl rand -hex 32` 生成一段随机串填进去。
-- 其余项保持默认即可。
+- **根 `.env`**（Docker Compose 读）：`DATABASE_URL`、`PG_*`、`JWT_SECRET`。
+  `DATABASE_URL` 的主机名必须写 **`db`**（compose 服务名），不能写 localhost。
+  `JWT_SECRET` 用 `openssl rand -hex 32` 生成。
+- **`backend/.env`**（应用进程读）：`OPENMAIC_ACCESS_CODE`，即 https://open.maic.chat 的访问码（`sk-` 开头）。
+  ⚠️ **必须写在这个文件里**。容器内 Python 的 cwd 是 `/app/backend`，应用只认 `/app/backend/.env`；
+  只写根 `.env` 会导致 AI 课堂生成返回 **501 未配置访问码**（D4 已踩坑）。
+  这是挂载卷，改完 `docker compose restart web` 即生效。
+
+> 完整说明见项目根目录 `D5-部署文档.md`。
 
 ## 四、修改域名（有域名时）
 
@@ -64,24 +73,25 @@ docker compose up -d --build
 
 首次构建会拉取 Python 镜像并安装依赖（约 1–2 分钟）。启动后：
 
-- 打开 `https://你的域名`，用 `student / 123456` 登录。
+- 打开 `https://你的域名`，用 **`student01 / 123456`** 登录（封闭账号制，已关闭自助注册）。
 - 看日志：`docker compose logs -f web`
 - 停止：`docker compose down`
 - 重启：`docker compose restart`
 
 ## 六、数据与持久化
 
-- 数据库（SQLite）存在 Docker 卷 `app-data` 中，**容器重建/重启不会丢数据**。
-- 想备份数据库：`docker compose exec web cp /app/data/app.db /tmp/app.db` 再 `docker cp` 出来。
+- 数据库是 **PostgreSQL（pgvector 镜像）**，数据在 Docker 卷 **`pg-data`** 中，**容器重建/重启不会丢数据**。
+- 备份：`docker exec site-db-1 pg_dump -U grad_ai grad_ai > backup_$(date +%F).sql`
+- 恢复：`cat backup_xxx.sql | docker exec -i site-db-1 psql -U grad_ai -d grad_ai`
+- 查库：`docker exec site-db-1 psql -U grad_ai -d grad_ai -c "SQL"`
 
 ## 七、生产加固建议（申报/正式上线前）
 
 1. **HTTPS 必开**：Caddy 已自动处理，别用 `:80` 长期跑明文。
 2. **JWT_SECRET 必须改**：已支持环境变量，切勿保留默认值。
-3. **并发量高时换 PostgreSQL**：代码用 SQLAlchemy 抽象，只改 `db.py` 的
-   `SQLALCHEMY_DATABASE_URL` 即可，其余不动。
-4. **账号体系**：当前是演示用自助注册 + 预设 `student` 账号；正式校园平台建议对接
-   学校 CAS / OAuth2 统一身份认证（原方案已规划）。
+3. **数据库默认即 PostgreSQL（pgvector）**，无需再切换；数据在卷 `pg-data`，定期 `pg_dump` 备份。
+4. **账号体系**：当前为**封闭账号制（已关闭自助注册）**，仅预设账号 `student01` 登录；
+   正式校园平台建议对接学校 CAS / OAuth2 统一身份认证（原方案已规划）。
 5. **访问码额度**：OpenMAIC 云端每码每日 10 次生成，正式环境建议申请独立码或私有化部署。
 
 ## 八、目录结构（部署视角）
