@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from core.security import get_current_user
 from core.utils import fmt
-from models import SignIn, User
+from models import Course, SignIn, User
 
 router = APIRouter(prefix="/api", tags=["checkin"])
 
@@ -24,6 +24,9 @@ def do_signin(body: SignInIn, db: Session = Depends(get_db),
     allowed = {"location", "gesture", "photo", "qr"}
     if body.method not in allowed:
         raise HTTPException(400, "不支持的签到方式")
+    # 存在性校验：防止签到到不存在的课程，产生孤儿 signin 脏数据
+    if not db.query(Course).filter(Course.id == body.course_id).first():
+        raise HTTPException(404, "课程不存在")
     s = SignIn(user_id=user.id, course_id=body.course_id, method=body.method,
                lat=body.lat, lng=body.lng, status="success")
     db.add(s)

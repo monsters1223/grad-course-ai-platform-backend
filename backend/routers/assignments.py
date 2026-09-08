@@ -1,6 +1,6 @@
 """作业与提交路由。"""
 from datetime import datetime
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from core.database import get_db
@@ -33,6 +33,9 @@ class SubmitIn(BaseModel):
 @router.post("/homeworks/submit")
 def submit(body: SubmitIn, db: Session = Depends(get_db),
            user: User = Depends(get_current_user)):
+    # 存在性校验：防止提交到不存在的作业，产生孤儿 submission 脏数据
+    if not db.query(Homework).filter(Homework.id == body.homework_id).first():
+        raise HTTPException(404, "作业不存在")
     sub = db.query(Submission).filter(
         Submission.homework_id == body.homework_id,
         Submission.user_id == user.id).first()
