@@ -71,6 +71,8 @@ class Submission(Base):
     homework_id = Column(Integer, ForeignKey("homeworks.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     answer = Column(Text)
+    file_path = Column(String(512), nullable=True)   # 上传的作业文件相对路径（存于 /app/data/uploads）
+    file_name = Column(String(256), nullable=True)    # 原始文件名（展示用）
     score = Column(String(8))
     submitted_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="submissions")
