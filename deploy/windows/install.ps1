@@ -122,15 +122,18 @@ if (-not $rule) {
 
 # ---------- 8. scheduled task (auto start, survives RDP logoff) ----------
 Info "Registering scheduled task '$TaskName' (run as SYSTEM at startup) ..."
-schtasks /query /tn $TaskName 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    schtasks /end /tn $TaskName 2>$null | Out-Null
-    schtasks /delete /tn $TaskName /f 2>$null | Out-Null
-}
-$tr = '"' + $Bat + '" ' + $Port
-schtasks /create /tn $TaskName /tr $tr /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail "schtasks /create failed." }
-schtasks /run /tn $TaskName | Out-Null
+try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch { }
+try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+
+$action    = New-ScheduledTaskAction -Execute $Bat -Argument "$Port"
+$trigger   = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 `
+                -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName $TaskName
 Ok "scheduled task created and started"
 
 Start-Sleep -Seconds 6
@@ -155,8 +158,8 @@ Get-NetIPAddress -AddressFamily IPv4 |
     ForEach-Object { Write-Host ("    http://" + $_.IPAddress + ":$Port/") -ForegroundColor Yellow }
 Write-Host ""
 Ok "Installation finished."
-Write-Host "  Start : schtasks /run /tn $TaskName"
-Write-Host "  Stop  : schtasks /end /tn $TaskName   (then taskkill /F /IM python.exe if needed)"
+Write-Host "  Start : Start-ScheduledTask -TaskName $TaskName"
+Write-Host "  Stop  : Stop-ScheduledTask -TaskName $TaskName   (then taskkill /F /IM python.exe if needed)"
 Write-Host "  Log   : $Logs\server.log"
 Write-Host "  Data  : $Data"
 Write-Host ""
