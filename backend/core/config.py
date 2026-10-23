@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # 留空则回落 SQLite；填写 postgresql+psycopg2://... 则连接 PostgreSQL
     database_url: str = ""
     sqlite_path: str = ""
+    # 运行期数据目录（作业附件等）。容器部署设为 /app/data；Windows 原生部署设为绝对路径。
+    # 留空则默认使用 backend/data。
+    data_dir: str = ""
     ai_backend: str = "mock"
 
 

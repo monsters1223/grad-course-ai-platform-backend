@@ -74,6 +74,11 @@ UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
 
+# 原生部署（Windows 直接跑 uvicorn、不经过 Nginx/Caddy）时，index.html 用相对路径
+# 引用 styles.css / app.js / data.js 等，必须把静态目录挂到根路径才能加载。
+# 该 mount 注册在所有路由之后，/api、/ws、/docs、/files 仍优先匹配，不影响原有行为。
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="root")
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

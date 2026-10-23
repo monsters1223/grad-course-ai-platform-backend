@@ -1,10 +1,20 @@
-# Caddy 反向代理 + 自动 HTTPS（Let's Encrypt 免费证书）
-# 部署时把 your-domain.com 换成你的域名，并确认该域名的 DNS A 记录已指向本服务器公网 IP。
-# 若暂无域名，可临时改为 :80 走纯 HTTP（不安全，仅演示用）：
-#     :80 {
-#         reverse_proxy web:8000
-#     }
-your-domain.com {
-    # 可选：上传文件较大时调高
-    reverse_proxy web:8000
+# Caddy 反向代理 + 静态托管（校内 IP 部署，纯 HTTP）
+# 监听 :80，绑定本机所有网卡；前端静态由 Caddy 直接托管，
+# /api 与 /ws 反向代理到后端 web 容器。访问方式：http://<校内IP>/
+# 无需域名、无需 HTTPS 证书；更换机器只需把 <校内IP> 换成新地址，无需改任何代码。
+
+:80 {
+    root * /srv/fe
+    encode gzip
+
+    # 后端 REST API
+    reverse_proxy /api/* web:8000
+    # 后端 WebSocket 群聊（路由 /ws/chat/{rid}）
+    reverse_proxy /ws/* web:8000
+    # 后端 API 文档（可选，方便调试）
+    reverse_proxy /docs web:8000
+    reverse_proxy /openapi.json web:8000
+
+    # 其余请求统一返回前端静态文件
+    file_server
 }

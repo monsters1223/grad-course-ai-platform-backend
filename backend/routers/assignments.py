@@ -6,13 +6,18 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from core.database import get_db
+from core.config import settings
 from core.security import get_current_user
 from models import Homework, Submission, User
 
 router = APIRouter(prefix="/api", tags=["assignments"])
 
-# 上传文件统一存放在容器 /app/data/uploads（该目录已随 app-data 卷持久化）
-UPLOAD_DIR = "/app/data/uploads"
+# 上传文件根目录：容器部署用 DATA_DIR=/app/data；Windows 原生部署用绝对路径。
+# 未配置时默认 backend/data/uploads（不再硬编码 Linux 路径，保证跨平台可运行）。
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = (settings.data_dir or os.environ.get("DATA_DIR") or
+            os.path.join(_BACKEND_DIR, "data")).strip()
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 
 
 @router.get("/courses/{cid}/homeworks")
@@ -80,7 +85,7 @@ async def submit_file(
         content = await file.read()
         with open(dest, "wb") as f:
             f.write(content)
-        saved_path = f"uploads/{saved_name}"  # 相对 /app/data 的路径
+        saved_path = f"uploads/{saved_name}"  # 相对 DATA_DIR 的路径
 
     sub = db.query(Submission).filter(
         Submission.homework_id == homework_id,

@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700;800&family=Nunito:wght@600;700;800&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/static/styles.css" />
+<link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
@@ -16,7 +16,7 @@
   <div class="login-card">
     <div class="login-left">
       <div class="brand">
-        <div class="b-mark">🎓</div>
+        <div class="b-mark" data-icon="graduation-cap"></div>
         <div>
           <b>研究生通识课 AI 教育平台</b>
           <div class="b-sub">多智能体 · 主动学习</div>
@@ -27,32 +27,80 @@
         课程中心 · AI 课堂（OpenMAIC）· 课程讨论 · 班级群聊 · 学习小组 · 课堂签到，一站式研究生通识课学习空间。
       </p>
       <div class="b-tags">
-        <span>📚 课程中心</span><span>🤖 AI 课堂</span><span>💬 群聊</span><span>✅ 签到</span>
+        <span><span class="ic" data-icon="book-open"></span> 课程中心</span><span><span class="ic" data-icon="bot"></span> AI 课堂</span><span><span class="ic" data-icon="message"></span> 群聊</span><span><span class="ic" data-icon="check-circle"></span> 签到</span>
       </div>
     </div>
     <div class="login-right">
       <h2 style="margin-bottom:6px">学生登录</h2>
       <p class="h-sub" style="margin-bottom:18px">使用学生账号进入学习空间</p>
       <div id="loginForm">
-        <div class="field"><label>学号 / 用户名</label><input id="li-user" placeholder="如 student" /></div>
-        <div class="field"><label>密码</label><input id="li-pass" type="password" placeholder="••••••" /></div>
+        <div class="field"><label>账号</label><input id="li-user" placeholder="请输入学号或用户名" /></div>
+        <div class="field">
+          <label>密码</label>
+          <div class="field-in">
+            <input id="li-pass" type="password" placeholder="请输入密码" />
+            <span class="eye" id="eyeBtn" data-icon="eye" onclick="togglePwd()"></span>
+          </div>
+        </div>
         <button class="btn" style="width:100%;margin-top:6px" onclick="doLogin()">登录进入</button>
         <p id="li-err" class="muted" style="color:var(--danger);min-height:18px;font-size:12px;margin-top:8px"></p>
+        <p class="muted" style="font-size:11px;margin-top:12px;text-align:center;line-height:1.6;color:var(--text-3)">
+          本平台为校内封闭账号体系，<br>账号由管理员统一下发，不支持自助注册。<br>
+          如未收到账号或忘记密码，请联系教务处。
+        </p>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:14px;text-align:center">
-        <span style="color:var(--text-2)">账号由管理员统一下发</span>
-      </p>
-      <p class="muted" style="font-size:11px;margin-top:6px;text-align:center">演示账号：student01 / 123456</p>
+
+      <div id="forgotForm" style="display:none">
+        <div class="field"><label>学号</label><input id="fg-user" placeholder="请输入 8 位学号" inputmode="numeric" maxlength="8" /></div>
+        <div class="field">
+          <label>设置新密码</label>
+          <div class="field-in">
+            <input id="fg-pass" type="password" placeholder="至少 6 位" />
+            <span class="eye" id="eyeBtn4" data-icon="eye" onclick="togglePwdFg()"></span>
+          </div>
+        </div>
+        <div class="field">
+          <label>确认新密码</label>
+          <div class="field-in">
+            <input id="fg-pass2" type="password" placeholder="再次输入密码" />
+            <span class="eye" id="eyeBtn5" data-icon="eye" onclick="togglePwdFg2()"></span>
+          </div>
+        </div>
+        <button class="btn" style="width:100%;margin-top:6px" onclick="doForgot()">重置密码</button>
+        <p id="fg-msg" class="muted" style="color:var(--danger);min-height:18px;font-size:12px;margin-top:8px"></p>
+        <button class="btn ghost" style="width:100%;margin-top:6px" onclick="showLogin()">返回登录</button>
+      </div>
+
+      <div id="regForm" style="display:none">
+        <div class="field"><label>学号</label><input id="reg-user" placeholder="请输入 8 位学号" inputmode="numeric" maxlength="8" /></div>
+        <div class="field">
+          <label>设置密码</label>
+          <div class="field-in">
+            <input id="reg-pass" type="password" placeholder="至少 6 位" />
+            <span class="eye" id="eyeBtn2" data-icon="eye" onclick="togglePwdReg()"></span>
+          </div>
+        </div>
+        <div class="field">
+          <label>确认密码</label>
+          <div class="field-in">
+            <input id="reg-pass2" type="password" placeholder="再次输入密码" />
+            <span class="eye" id="eyeBtn3" data-icon="eye" onclick="togglePwdReg2()"></span>
+          </div>
+        </div>
+        <p class="muted" style="font-size:11px;margin-top:4px;color:#d97706">⚠ 演示系统：密码仅保存在本机浏览器，请勿使用真实密码。</p>
+        <button class="btn" style="width:100%;margin-top:6px" onclick="doRegister()">注册</button>
+        <p id="reg-msg" class="muted" style="color:var(--danger);min-height:18px;font-size:12px;margin-top:8px"></p>
+        <button class="btn ghost" style="width:100%;margin-top:6px" onclick="showLogin()">返回登录</button>
+      </div>
     </div>
   </div>
 </div>
 
 <!-- ============ 主应用 ============ -->
 <div id="app" class="app" style="display:none">
-  <!-- 侧边栏 -->
   <aside class="sidebar">
     <div class="logo">
-      <div class="mark">🎓</div>
+      <div class="mark" data-icon="graduation-cap"></div>
       <div><b>通识课 AI 平台</b><div class="sub">学生端</div></div>
     </div>
     <nav class="nav" id="nav"></nav>
@@ -63,19 +111,47 @@
     </div>
   </aside>
 
-  <!-- 主区 -->
   <main class="main">
     <div class="topbar">
-      <div class="search"><span>🔍</span><input placeholder="搜索课程、资料、讨论…" /></div>
+      <div class="search"><span class="ic" data-icon="search"></span><input id="topSearch" placeholder="搜索课程、资料、讨论…" /></div>
       <div class="top-actions">
-        <div class="bell">🔔<span class="dot"></span></div>
-        <div class="avatar" id="topAvatar" style="cursor:pointer" onclick="logout()">依</div>
+        <div class="bell" id="bellBtn"><span class="ic" data-icon="bell"></span><span class="dot"></span>
+          <div class="notify" id="notifyPanel"></div>
+        </div>
+        <div class="avatar-wrap">
+          <div class="avatar" id="topAvatar" style="cursor:pointer" onclick="toggleAvatarMenu()" title="账号"></div>
+          <div class="avatar-menu" id="avatarMenu">
+            <div class="who" id="menuWho"></div>
+            <div class="menu-item" onclick="openProfile()"><span class="ic" data-icon="user"></span> 账号管理</div>
+            <div class="menu-item" onclick="logout()"><span class="ic" data-icon="log-out"></span> 退出登录</div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="content" id="view"></div>
   </main>
 </div>
 
-<script src="/static/app.js"></script>
+<!-- ============ 账号管理弹窗 ============ -->
+<div class="modal-mask" id="profileMask" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <b>账号管理</b>
+      <span class="modal-close" onclick="closeProfile()" title="关闭">✕</span>
+    </div>
+    <div class="tabs" id="profileTabs">
+      <div class="tab cur" data-tab="info">基本资料</div>
+      <div class="tab" data-tab="nick">修改昵称</div>
+      <div class="tab" data-tab="avatar">修改头像</div>
+      <div class="tab" data-tab="pwd">修改密码</div>
+    </div>
+    <div class="tab-body" id="profileBody"></div>
+  </div>
+</div>
+
+<script src="data.js"></script>
+<script src="icons.js"></script>
+<script src="api.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

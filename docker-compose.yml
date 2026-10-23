@@ -23,6 +23,8 @@ services:
       # 配了 DATABASE_URL 就连 PostgreSQL；没配就回落 SQLite
       DATABASE_URL: ${DATABASE_URL:-}
       SQLITE_PATH: /app/data/app.db
+      # 作业附件等运行期数据的根目录（与 app-data 卷一致）
+      DATA_DIR: /app/data
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
     env_file:
       - .env
@@ -50,6 +52,8 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 前端静态目录挂进 Caddy，由 Caddy 在 :80 统一托管（校内 IP 访问入口）
+      - ./static:/srv/fe:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
