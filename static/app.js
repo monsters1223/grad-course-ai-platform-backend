@@ -2240,6 +2240,19 @@ async function sendAI() {
     if (e.target.id === "li-user" || e.target.id === "li-pass") doLogin();
   });
 
+  // GitHub Pages 上的旧演示站没有后端，直接给出说明，避免访问者看到"网络异常"
+  if (/\.github\.io$/i.test(location.hostname)) {
+    const lr = $(".login-right");
+    if (lr) {
+      lr.innerHTML =
+        '<h2 style="margin-bottom:10px">演示站已停止维护</h2>' +
+        '<p class="h-sub" style="line-height:1.9">本平台前端已改为对接校内后端，<br>' +
+        '请在校园网内访问：<br><b style="color:var(--primary-deep)">http://172.30.1.34</b></p>' +
+        '<p class="muted" style="font-size:12px;margin-top:14px;color:var(--text-3)">' +
+        '账号由学校统一下发，如需开通请联系任课教师。</p>';
+    }
+  }
+
   initIcons();
 })();
 
