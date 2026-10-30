@@ -1,7 +1,7 @@
 """数据模型：仅学生端相关的实体。"""
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
+    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from core.database import Base
@@ -15,12 +15,26 @@ class User(Base):
     password_hash = Column(String(128), nullable=False)
     avatar = Column(String(8), default="学")
     email = Column(String(128), nullable=True)
-    role = Column(String(16), default="student")  # 仅学生端，固定 student
+    role = Column(String(16), default="student")  # student / teacher
+    klass = Column("class", String(64), nullable=True)  # 班级（映射 DB 列 class）
+    major = Column(String(64), nullable=True)  # 专业
     created_at = Column(DateTime, default=datetime.utcnow)
 
     messages = relationship("Message", back_populates="user")
     submissions = relationship("Submission", back_populates="user")
     signins = relationship("SignIn", back_populates="user")
+
+
+class Enrollment(Base):
+    """选课关系：学生与课程的关联（行级隔离基础）。"""
+    __tablename__ = "enrollments"
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("student_id", "course_id", name="uq_enroll"),)
+    student = relationship("User", backref="enrollments")
+    course = relationship("Course", backref="enrollments")
 
 
 class Course(Base):
@@ -32,6 +46,7 @@ class Course(Base):
     cover = Column(String(16), default="📘")
     category = Column(String(32), default="通识课")
     desc = Column(Text)
+    code = Column(String(32), nullable=True)  # 课程代码，如 CS101
     progress = Column(Integer, default=0)  # 示例进度（演示用，真实按学习记录算）
     ai_classroom_url = Column(String(512), nullable=True)  # OpenMAIC 生成的互动课堂 URL
 
@@ -44,6 +59,18 @@ class Section(Base):
     stype = Column(String(16), default="video")  # video / quiz
     content = Column(Text)  # 视频地址或测验说明
     position = Column(Integer, default=0)
+
+
+class Question(Base):
+    """测验题库：仅服务端持有标准答案（answer），前端取题时绝不返回该字段。"""
+    __tablename__ = "questions"
+    id = Column(Integer, primary_key=True, index=True)
+    section_id = Column(Integer, ForeignKey("sections.id"), nullable=False, index=True)
+    q_order = Column(Integer, default=0)        # 题目序号（同 section 内）
+    q_text = Column(Text, nullable=False)        # 题干
+    options = Column(Text, nullable=False)       # JSON 数组，如 ["A","B","C","D"]
+    answer = Column(Integer, default=0)          # 正确选项下标（仅服务端）
+    explanation = Column(Text)                   # 解析（提交后下发前端）
 
 
 class Discussion(Base):
@@ -74,6 +101,9 @@ class Submission(Base):
     file_path = Column(String(512), nullable=True)   # 上传的作业文件相对路径（存于 /app/data/uploads）
     file_name = Column(String(256), nullable=True)    # 原始文件名（展示用）
     score = Column(String(8))
+    feedback = Column(Text, nullable=True)   # 批改反馈
+    graded_at = Column(DateTime, nullable=True)  # 批改时间
+    status = Column(String(16), default="ungraded")  # ungraded / graded
     submitted_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="submissions")
 
@@ -137,6 +167,16 @@ class SignIn(Base):
     user = relationship("User", back_populates="signins")
 
 
+class SigninSession(Base):
+    """教师开启的签到窗口：一次开/关为一个会话，用于判定学生在窗口内是否签到。"""
+    __tablename__ = "signin_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    opened_at = Column(DateTime, default=datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+    opened_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
 class Announcement(Base):
     __tablename__ = "announcements"
     id = Column(Integer, primary_key=True, index=True)
@@ -145,6 +185,30 @@ class Announcement(Base):
     title = Column(String(128), nullable=False)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Notification(Base):
+    """站内通知：教师端与学生端之间唯一的交互通道。
+
+    一行 = 一个收件人的一条通知（写入时扇出）。这样做的好处：
+      - 未读数 / 已读状态是单表查询，无需额外关联表；
+      - 每条通知可携带自己的跳转目标（课程 / 页面 / tab），前端点开即达；
+      - 学生转班/退课不影响历史通知的可见性（与邮件语义一致）。
+    """
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)  # 收件人
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)              # 触发者
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)           # 关联课程
+    kind = Column(String(24), default="system", index=True)
+    # kind: announcement / homework / grade / signin / content / submission / discussion / system
+    title = Column(String(160), nullable=False)
+    body = Column(Text)
+    page = Column(String(32), nullable=True)   # 前端路由：learn / signin / dashboard / t_courses ...
+    tab = Column(String(32), nullable=True)    # 课程详情内 tab：homework / quiz / announcements ...
+    ref_id = Column(Integer, nullable=True)    # 关联业务 id（作业/公告等）
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    read_at = Column(DateTime, nullable=True, index=True)
 
 
 class StudyLog(Base):
@@ -170,4 +234,5 @@ class QuizResult(Base):
     quiz_title = Column(String(128))
     score = Column(Integer, default=0)                # 答对题数
     total = Column(Integer, default=0)                # 总题数
+    answers = Column(Text, nullable=True)             # JSON：用户作答选项下标（回显解析用）
     submitted_at = Column(DateTime, default=datetime.utcnow)

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from core.security import get_current_user
 from core.utils import fmt
+from core.notify import notify_course_teacher
 from models import Discussion, User, Course
 
 router = APIRouter(prefix="/api", tags=["discussion"])
@@ -41,4 +42,12 @@ def post_discussion(body: DiscussionIn, db: Session = Depends(get_db),
                    content=body.content, parent_id=body.parent_id)
     db.add(d)
     db.commit()
+    # 教师端联动：学生发起课程讨论，教师可在通知中心直接跳转课程讨论区
+    if user.role != "teacher":
+        notify_course_teacher(
+            db, body.course_id, kind="discussion",
+            title="%s 在《%s》发起了讨论" % (user.name, c.title),
+            body=(body.content or "").strip()[:120],
+            page="learn", tab="discussion", ref_id=d.id, actor_id=user.id,
+        )
     return {"ok": True}

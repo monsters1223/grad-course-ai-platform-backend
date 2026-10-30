@@ -3,26 +3,33 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>研究生通识课 AI 教育平台 · 学生端</title>
+<title>研究生通识课 AI 教育平台</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700;800&family=Nunito:wght@600;700;800&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="styles.css?v=20261030f" />
 </head>
 <body>
 
-<!-- ============ 登录（仅学生） ============ -->
+<!-- ============ 登录（学生 / 教师） ============ -->
 <div id="login" class="login-wrap">
+  <div class="login-bg" aria-hidden="true">
+    <div class="bg-grid"></div>
+    <div class="bg-glow bg-glow--cyan"></div>
+    <div class="bg-glow bg-glow--magenta"></div>
+    <div class="bg-scan"></div>
+  </div>
   <div class="login-card">
     <div class="login-left">
       <div class="brand">
         <div class="b-mark" data-icon="graduation-cap"></div>
         <div>
           <b>研究生通识课 AI 教育平台</b>
-          <div class="b-sub">多智能体 · 主动学习</div>
+          <div class="b-sub">多智能体 · 主动学习空间</div>
         </div>
       </div>
-      <h1 style="font-size:26px;margin:18px 0 10px">让通识课<br>主动学起来</h1>
+      <div class="b-eyebrow">上海对外经贸大学</div>
+      <h1 style="font-size:26px;margin:14px 0 10px">让通识课<br>主动学起来</h1>
       <p style="opacity:.9;font-size:14px;line-height:1.7">
         课程中心 · AI 课堂（OpenMAIC）· 课程讨论 · 班级群聊 · 学习小组 · 课堂签到，一站式研究生通识课学习空间。
       </p>
@@ -31,8 +38,8 @@
       </div>
     </div>
     <div class="login-right">
-      <h2 style="margin-bottom:6px">学生登录</h2>
-      <p class="h-sub" style="margin-bottom:18px">使用学生账号进入学习空间</p>
+      <h2 style="margin-bottom:6px">登录</h2>
+      <p class="h-sub" style="margin-bottom:18px">使用账号进入学习空间（学生 / 教师）</p>
       <div id="loginForm">
         <div class="field"><label>账号</label><input id="li-user" placeholder="请输入学号或用户名" /></div>
         <div class="field">
@@ -115,7 +122,7 @@
     <div class="topbar">
       <div class="search"><span class="ic" data-icon="search"></span><input id="topSearch" placeholder="搜索课程、资料、讨论…" /></div>
       <div class="top-actions">
-        <div class="bell" id="bellBtn"><span class="ic" data-icon="bell"></span><span class="dot"></span>
+        <div class="bell" id="bellBtn" title="通知中心"><span class="ic" data-icon="bell"></span><span class="bell-badge" id="bellBadge"></span>
           <div class="notify" id="notifyPanel"></div>
         </div>
         <div class="avatar-wrap">
@@ -149,9 +156,10 @@
   </div>
 </div>
 
-<script src="data.js"></script>
-<script src="icons.js"></script>
-<script src="api.js"></script>
-<script src="app.js"></script>
+<!-- 脚本带版本号：更新前端后改这里的 v，浏览器就不会继续用旧缓存 -->
+<script src="data.js?v=20261030f"></script>
+<script src="icons.js?v=20261030f"></script>
+<script src="api.js?v=20261030f"></script>
+<script src="app.js?v=20261030f"></script>
 </body>
 </html>

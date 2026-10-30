@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from core.database import SessionLocal
+from core.database import SessionLocal, get_db
 from models import User
 
 # 生产部署请通过环境变量 JWT_SECRET 设置一个强随机值（如 openssl rand -hex 32）
@@ -49,7 +49,14 @@ def decode_token(token: str) -> Optional[dict]:
         return None
 
 
-def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
+def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
+                     db: Session = Depends(get_db)) -> User:
+    """解析 JWT 并返回当前用户。
+
+    关键：这里必须复用请求级数据库会话（Depends(get_db)），不能自己开一个再关掉。
+    旧实现在 finally 里 close() 了会话，返回的是**游离态**对象——任何
+    `user.xxx = ...; db.commit()` 的写法都会静默失效（改密码曾经就是这样不生效的）。
+    """
     cred_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="未登录或登录已过期",
@@ -60,11 +67,7 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
     payload = decode_token(token)
     if not payload:
         raise cred_exc
-    db: Session = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == int(payload["sub"])).first()
-    finally:
-        db.close()
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
     if not user:
         raise cred_exc
     return user

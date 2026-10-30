@@ -5,19 +5,15 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from core.database import get_db
-from core.config import settings
+from core.database import get_db, UPLOAD_DIR
 from core.security import get_current_user
-from models import Homework, Submission, User
+from core.notify import notify_course_teacher
+from models import Homework, Submission, User, Course
 
 router = APIRouter(prefix="/api", tags=["assignments"])
 
-# 上传文件根目录：容器部署用 DATA_DIR=/app/data；Windows 原生部署用绝对路径。
-# 未配置时默认 backend/data/uploads（不再硬编码 Linux 路径，保证跨平台可运行）。
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = (settings.data_dir or os.environ.get("DATA_DIR") or
-            os.path.join(_BACKEND_DIR, "data")).strip()
-UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+# 作业附件根目录：必须与 main.py 挂载的 /files 指向同一目录（core.database.UPLOAD_DIR = backend/uploads），
+# 否则学生上传的附件教师端在 /files 下下载不到。故直接复用 core.database.UPLOAD_DIR，不再自造 data/uploads。
 
 
 @router.get("/courses/{cid}/homeworks")
@@ -45,7 +41,8 @@ class SubmitIn(BaseModel):
 def submit(body: SubmitIn, db: Session = Depends(get_db),
            user: User = Depends(get_current_user)):
     # 存在性校验：防止提交到不存在的作业，产生孤儿 submission 脏数据
-    if not db.query(Homework).filter(Homework.id == body.homework_id).first():
+    hw = db.query(Homework).filter(Homework.id == body.homework_id).first()
+    if not hw:
         raise HTTPException(404, "作业不存在")
     sub = db.query(Submission).filter(
         Submission.homework_id == body.homework_id,
@@ -58,6 +55,13 @@ def submit(body: SubmitIn, db: Session = Depends(get_db),
                          answer=body.answer)
         db.add(sub)
     db.commit()
+    # 教师端联动：学生交作业后，任课教师铃铛即时提醒，可直达批改台
+    notify_course_teacher(
+        db, hw.course_id, kind="submission",
+        title="%s 提交了作业：%s" % (user.name, hw.title),
+        body=(body.answer or "").strip()[:100],
+        tab="grading", ref_id=hw.id, actor_id=user.id,
+    )
     return {"ok": True}
 
 
@@ -85,7 +89,7 @@ async def submit_file(
         content = await file.read()
         with open(dest, "wb") as f:
             f.write(content)
-        saved_path = f"uploads/{saved_name}"  # 相对 DATA_DIR 的路径
+        saved_path = saved_name  # 仅存文件名；/files 挂载在 backend/uploads，故 /files/<saved_name> 可直链下载
 
     sub = db.query(Submission).filter(
         Submission.homework_id == homework_id,
@@ -102,4 +106,11 @@ async def submit_file(
         )
         db.add(sub)
     db.commit()
+    # 教师端联动：带附件提交同样通知（提示附件名，便于教师判断批改成本）
+    notify_course_teacher(
+        db, hw.course_id, kind="submission",
+        title="%s 提交了作业：%s" % (user.name, hw.title),
+        body=("附件：" + original_name) if original_name else (answer or "").strip()[:100],
+        tab="grading", ref_id=hw.id, actor_id=user.id,
+    )
     return {"ok": True, "file_name": original_name}

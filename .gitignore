@@ -35,3 +35,9 @@ Thumbs.db
 # 注意：uploads/ 目录（课程视频与课件，约 4MB）保留在版本库中，
 # 因为 seed_courses.py 与 Docker 构建都依赖这些文件，
 # 若排除会导致搭档 clone 后课程资源缺失、镜像构建失败。
+
+# 教师上传的真实课件（属于课程内容，不入公开仓库；seed 用的示例课件不受影响）
+backend/uploads/*.pptx
+backend/uploads/*.docx
+backend/uploads/*.xlsx
+backend/uploads/*.pdf

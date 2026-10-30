@@ -88,6 +88,61 @@ function getAllUsers() {
   return USERS.concat(lsGet("reg_users", []));
 }
 
+/* ---------------- 阶段一：课程数据源切换（后端为唯一真源，data.js 仅离线兜底） ---------------- */
+let COURSE_CACHE = {};            // 课程详情缓存：id -> detail
+let COURSE_LIST_CACHE = null;     // 课程列表缓存（后端返回；null 时回退 COURSES）
+
+async function loadCourseList() {
+  try {
+    const list = await API.getCourses();
+    if (list && list.length) { COURSE_LIST_CACHE = list; return list; }
+  } catch (e) {}
+  return COURSES;
+}
+function courseList() { return COURSE_LIST_CACHE || COURSES; }
+
+async function loadCourse(id) {
+  if (COURSE_CACHE[id]) return COURSE_CACHE[id];
+  try {
+    const c = await API.getCourseDetail(id);
+    if (c) { COURSE_CACHE[id] = c; return c; }
+  } catch (e) {}
+  return COURSES.find((x) => x.id === id) || null;
+}
+
+// 课程封面（后端仅返回 cover emoji，前端按 id 派生配色）
+function courseCover(c) {
+  const palette = ["#A99CF5", "#62CBA0", "#5E82D8", "#E0A458", "#D98C9A"];
+  return {
+    color: c.coverColor || palette[(((c.id || 1) - 1) % palette.length)] || "#A99CF5",
+    text: c.coverText || c.cover || "课",
+  };
+}
+
+// 课件在线预览：统一走服务端渲染页（Office/PDF/图片/文本都能直接在浏览器里看，不再强制下载）
+function previewUrl(content, title) {
+  return "/api/preview?path=" + encodeURIComponent(content || "") +
+    (title ? "&title=" + encodeURIComponent(title) : "");
+}
+// 下载文件名：保留真实扩展名，避免 .pptx 被存成 .html 打不开
+function downloadName(title, content) {
+  const m = /\.([a-z0-9]{2,5})(?:$|\?)/i.exec(content || "");
+  const ext = m ? m[1].toLowerCase() : "";
+  const base = String(title || "课件").replace(/[\\/:*?"<>|]/g, "").trim() || "课件";
+  return ext ? base + "." + ext : base;
+}
+
+// 课件类型标签：让老师/学生一眼知道是什么文件、能不能在线看
+function docTypeLabel(content) {
+  const m = /\.([a-z0-9]{2,5})(?:$|\?)/i.exec(content || "");
+  const ext = m ? m[1].toUpperCase() : "";
+  const ok = ["PPTX", "DOCX", "XLSX", "PDF", "HTML", "PNG", "JPG", "JPEG", "MP4"].indexOf(ext) >= 0;
+  return (ext ? ext + " " : "") + "课件" + (ok ? " · 支持在线预览" : "");
+}
+
+// 题干兼容：后端字段为 text，data.js 兜底字段为 q
+function qText(q) { return (q && q.text != null) ? q.text : (q && q.q); }
+
 /* ---------------- 阶段二：学情上报兜底（关页/切后台补报最后进度） ---------------- */
 function bindProgressReportFallback() {
   if (_progressReportBound) return;
@@ -193,6 +248,7 @@ async function doForgot() {
 function logout() {
   localStorage.removeItem("static_user");
   clearToken();
+  stopNotifPolling();
   currentUser = null;
   pages = {};
   activeNav = "home";
@@ -210,9 +266,14 @@ function showApp(opts) {
   $("#login").style.display = "none";
   $("#app").style.display = "flex";
   applyAvatar();
+  // 侧边栏标识：按角色显示「教师端 / 学生端」
+  const sb = $(".sidebar .sub");
+  if (sb) sb.textContent = isTeacher() ? "教师端" : "学生端";
   renderNav();
   showAIFAB();
-  navigate("home", Object.assign({ replace: true }, opts || {}));
+  startNotifPolling();  // 进入应用即开始轮询通知，保证教师发布后学生端数秒内可见
+  const entry = isTeacher() ? "t_courses" : "home";
+  navigate(entry, Object.assign({ replace: true }, opts || {}));
 }
 
 /* ---------------- 历史记录 / 浏览器返回 ---------------- */
@@ -399,7 +460,25 @@ function saveInfo() {
 }
 async function savePwd() {
   const msg = $("#pw-msg");
-  msg.textContent = "修改密码请联系管理员处理。";
+  const oldP = $("#pw-old") ? $("#pw-old").value : "";
+  const n1 = $("#pw-new") ? $("#pw-new").value : "";
+  const n2 = $("#pw-new2") ? $("#pw-new2").value : "";
+  msg.style.color = "var(--danger)";
+  if (!oldP || !n1) { msg.textContent = "请填写当前密码与新密码"; return; }
+  if (n1.length < 6) { msg.textContent = "新密码至少 6 位"; return; }
+  if (n1 !== n2) { msg.textContent = "两次输入的新密码不一致"; return; }
+  msg.style.color = "var(--text-3)";
+  msg.textContent = "提交中…";
+  try {
+    await API.changePassword(oldP, n1);
+    msg.style.color = "var(--success)";
+    msg.textContent = "✓ 密码已更新，下次登录请使用新密码";
+    ["#pw-old", "#pw-new", "#pw-new2"].forEach((s) => { const e = $(s); if (e) e.value = ""; });
+    toast("✓ 密码已更新");
+  } catch (e) {
+    msg.style.color = "var(--danger)";
+    msg.textContent = e.message || "修改失败";
+  }
 }
 
 /* ---------------- 顶部通知 ---------------- */
@@ -466,26 +545,193 @@ function buildNotifs() {
   return list;
 }
 
-function renderNotif() {
-  const box = $("#notifyPanel");
-  const notifs = buildNotifs();
-  box.innerHTML = '<div class="nt-head"><span>通知</span><span class="muted">共 ' + notifs.length + ' 条</span></div>';
-  if (!notifs.length) { box.innerHTML += '<div class="nt-empty">暂无通知</div>'; return; }
-  notifs.forEach((n) => {
-    const item = el("div", "nt-item");
-    const icBox = el("div", "nt-ic"); icBox.innerHTML = icon(n.ic, 18);
-    const body = el("div"); body.style.flex = "1";
-    body.innerHTML = '<div style="font-weight:700">' + esc(n.title) + '</div><div class="nt-body">' + esc(n.desc) + '</div>';
-    const t = el("div", "muted"); t.style.fontSize = "11px"; t.style.whiteSpace = "nowrap"; t.textContent = n.time;
-    item.appendChild(icBox); item.appendChild(body); item.appendChild(t);
-    item.onclick = () => {
-      box.classList.remove("show");
-      if (n.cid) { openCourse(n.cid, true); return; }
-      if (n.to) navigate(n.to);
-    };
-    box.appendChild(item);
-  });
+/* ---------------- 顶部通知中心（服务端驱动，师生互通） ----------------
+ * 数据源：GET /api/notifications（教师端发布 → 学生端接收；学生提交 → 教师端接收）
+ * 本地 buildNotifs() 只保留「学习待办」这类纯前端推算的提醒，作为面板底部的补充分组。
+ * 轮询：登录后每 20 秒拉一次未读数；窗口重新获得焦点时立即刷新。
+ */
+const NOTIF = { unread: 0, items: [], latestId: null, timer: null, open: false };
+
+// 通知类型 → 主色（图标底色与前景同色系，保证视觉一致）
+const NOTIF_TONE = {
+  announcement: "#2563EB",
+  homework: "#D97706",
+  grade: "#059669",
+  signin: "#0891B2",
+  content: "#7C3AED",
+  submission: "#2563EB",
+  discussion: "#7C3AED",
+  system: "#6B7280",
+};
+
+function setNotifBadge(n) {
+  const b = $("#bellBadge");
+  if (!b) return;
+  if (n > 0) {
+    b.textContent = n > 99 ? "99+" : String(n);
+    b.classList.add("show");
+  } else {
+    b.textContent = "";
+    b.classList.remove("show");
+  }
 }
+
+// 只取未读数的轻量轮询：有新消息时弹一条提示，并同步角标
+async function pollNotif() {
+  if (!currentUser) return;
+  try {
+    const s = await API.getNotifSummary();
+    const prev = NOTIF.latestId;
+    NOTIF.unread = s.unread || 0;
+    setNotifBadge(NOTIF.unread);
+    if (s.latest) {
+      NOTIF.latestId = s.latest.id;
+      if (prev && s.latest.id !== prev) {
+        if (NOTIF.open) renderNotif();
+        else toast("新通知 · " + s.latest.title);
+      }
+    }
+  } catch (e) { /* 未登录 / 离线时静默失败，不打扰用户 */ }
+}
+
+function startNotifPolling() {
+  stopNotifPolling();
+  pollNotif();
+  NOTIF.timer = setInterval(pollNotif, 20000);
+}
+function stopNotifPolling() {
+  if (NOTIF.timer) { clearInterval(NOTIF.timer); NOTIF.timer = null; }
+  NOTIF.unread = 0; NOTIF.items = []; NOTIF.latestId = null;
+  setNotifBadge(0);
+}
+
+function notifItem(n) {
+  const item = el("div", "nt-item" + (n.read ? "" : " unread"));
+  const tone = NOTIF_TONE[n.kind] || NOTIF_TONE.system;
+  const icBox = el("div", "nt-ic");
+  icBox.innerHTML = icon(n.icon || "bell", 17);
+  icBox.style.color = tone;
+  icBox.style.background = tone + "16";
+  const body = el("div", "nt-main");
+  body.innerHTML =
+    '<div class="nt-title">' + esc(n.title) + "</div>" +
+    (n.body ? '<div class="nt-desc">' + esc(n.body) + "</div>" : "") +
+    '<div class="nt-meta">' +
+      (n.course_title ? '<span class="nt-chip">' + esc(n.course_title) + "</span>" : "") +
+      '<span class="nt-time">' + esc(n.ago || n.created_at || "") + "</span>" +
+    "</div>";
+  item.appendChild(icBox);
+  item.appendChild(body);
+  if (!n.read) item.appendChild(el("span", "nt-dot"));
+  item.onclick = () => openNotification(n);
+  return item;
+}
+
+// 点击通知：标记已读 → 关闭面板 → 跳到对应课程/页面
+function openNotification(n) {
+  const box = $("#notifyPanel");
+  box.classList.remove("show");
+  NOTIF.open = false;
+  if (!n.read) {
+    const it = NOTIF.items.find((x) => x.id === n.id);
+    if (it) it.read = true;
+    NOTIF.unread = Math.max(0, NOTIF.unread - 1);
+    setNotifBadge(NOTIF.unread);
+    API.readNotification(n.id).catch(() => {});
+  }
+  if (n.course_id) {
+    // 通知携带的是「刚刚发生」的变更，必须绕过课程详情缓存，否则进去还是旧公告/旧作业
+    delete COURSE_CACHE[n.course_id];
+    if (isTeacher() && n.page !== "learn") openTeacherCourse(n.course_id, n.tab);
+    else openCourse(n.course_id, false, n.tab || "video");
+    return;
+  }
+  if (n.page) navigate(n.page);
+}
+
+async function renderNotif() {
+  const box = $("#notifyPanel");
+  box.innerHTML = '<div class="nt-head"><span>消息</span><span class="muted">加载中…</span></div>';
+  let data;
+  try {
+    data = await API.getNotifications(30);
+  } catch (e) {
+    box.innerHTML = '<div class="nt-empty">通知加载失败，请稍后重试</div>';
+    return;
+  }
+  NOTIF.items = (data && data.items) || [];
+  NOTIF.unread = (data && data.unread) || 0;
+  setNotifBadge(NOTIF.unread);
+  box.innerHTML = "";
+
+  // 头部：未读数 + 全部已读
+  const head = el("div", "nt-head");
+  head.appendChild(el("span", "nt-h-title", "消息"));
+  const headRight = el("div", "nt-h-right");
+  headRight.appendChild(el("span", "muted", NOTIF.unread ? NOTIF.unread + " 条未读" : "全部已读"));
+  if (NOTIF.unread) {
+    const all = el("button", "nt-link", "全部已读");
+    all.onclick = async (ev) => {
+      ev.stopPropagation();
+      try { await API.readAllNotifications(); } catch (e) {}
+      NOTIF.unread = 0;
+      NOTIF.items.forEach((x) => { x.read = true; });
+      setNotifBadge(0);
+      renderNotif();
+    };
+    headRight.appendChild(all);
+  }
+  head.appendChild(headRight);
+  box.appendChild(head);
+
+  // 消息列表
+  const list = el("div", "nt-list");
+  if (!NOTIF.items.length) {
+    list.innerHTML = '<div class="nt-empty">还没有来自老师的新消息<br>' +
+      '<span style="font-size:11px;opacity:.8">发布公告、布置作业、开启签到时，这里会自动提醒</span></div>';
+  }
+  NOTIF.items.forEach((n) => list.appendChild(notifItem(n)));
+  box.appendChild(list);
+
+  // 学习提醒：本地推算的待办，不进入消息表，学生端专用
+  if (!isTeacher()) {
+    const todos = buildNotifs().slice(0, 2);
+    if (todos.length) {
+      box.appendChild(el("div", "nt-group", "学习提醒"));
+      todos.forEach((t) => {
+        const item = el("div", "nt-item todo");
+        const icBox = el("div", "nt-ic");
+        icBox.innerHTML = icon(t.ic, 17);
+        icBox.style.color = NOTIF_TONE.system;
+        icBox.style.background = NOTIF_TONE.system + "16";
+        const body = el("div", "nt-main");
+        body.innerHTML = '<div class="nt-title">' + esc(t.title) + "</div>" +
+          '<div class="nt-desc">' + esc(t.desc) + "</div>";
+        item.appendChild(icBox); item.appendChild(body);
+        item.onclick = () => {
+          box.classList.remove("show"); NOTIF.open = false;
+          if (t.cid) openCourse(t.cid, false, "quiz");
+          else if (t.to) navigate(t.to);
+        };
+        box.appendChild(item);
+      });
+    }
+  }
+
+  // 底部：清理已读
+  if (NOTIF.items.some((x) => x.read)) {
+    const foot = el("div", "nt-foot");
+    const clr = el("button", "nt-link ghost", "清空已读消息");
+    clr.onclick = async (ev) => {
+      ev.stopPropagation();
+      try { await API.clearReadNotifications(); } catch (e) {}
+      renderNotif();
+    };
+    foot.appendChild(clr);
+    box.appendChild(foot);
+  }
+}
+
 
 /* ---------------- 导航 ---------------- */
 const NAV = [
@@ -500,7 +746,11 @@ const NAV = [
 function renderNav() {
   const nav = $("#nav");
   nav.innerHTML = "";
-  NAV.forEach((n) => {
+  // 教师端仅显示「我的课程」；学生端显示完整导航
+  const items = isTeacher()
+    ? [{ key: "t_courses", ic: "book-open", label: "我的课程" }]
+    : NAV;
+  items.forEach((n) => {
     const item = el("div", "nav-item" + (n.key === activeNav ? " active" : ""));
     const ic = el("span", "ic"); ic.innerHTML = icon(n.ic, 18);
     item.appendChild(ic);
@@ -513,6 +763,8 @@ function renderNav() {
 function navigate(key, opts) {
   opts = opts || {};
   activeNav = key;
+  // 每次切页顺手刷一次未读数（轮询之外的兜底，保证任何进入方式都能看到角标）
+  if (currentUser) pollNotif();
   renderNav();
   hideCrumb();
   if (!opts.noPush && !popHandling) pushView(key, opts.replace);
@@ -529,6 +781,7 @@ function navigate(key, opts) {
   pages[key].style.display = "block";
   // 数据页每次进入都重新读取本地记录，保证学情/进度/签到实时同步
   if (key === "home") renderHome(pages[key]);
+  else if (key === "t_courses") renderTeacherCourses(pages[key]);
   else if (key === "dashboard") { HW_STATES_LOADED = false; renderDashboard(pages[key]); }
   else if (key === "signin") renderSignin(pages[key]);
   else if (key === "chat") renderChat(pages[key]);
@@ -562,7 +815,7 @@ function highlight(text, term) {
   return esc(text.slice(0, idx)) + '<mark>' + esc(text.slice(idx, idx + term.length)) + '</mark>' + esc(text.slice(idx + term.length));
 }
 
-function renderHome(v) {
+async function renderHome(v) {
   v.innerHTML = "";
   v.appendChild(el("div", "h-title", "课程中心"));
   v.appendChild(el("p", "h-sub", currentUser.name + "，" + currentUser.major + " · 这里有你的通识课程"));
@@ -570,32 +823,34 @@ function renderHome(v) {
   const grid = el("div", "course-grid");
   v.appendChild(grid);
 
+  const list = await loadCourseList();
   const s = (searchTerm || "").trim().toLowerCase();
-  const list = COURSES.filter((c) => {
+  const filtered = (list || []).filter((c) => {
     if (!s) return true;
-    return (c.title + " " + (c.desc || "")).toLowerCase().includes(s);
+    return ((c.title || "") + " " + (c.desc || "")).toLowerCase().includes(s);
   });
 
-  if (!list.length) {
+  if (!filtered.length) {
     grid.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;padding:48px;color:var(--text-3)">未找到与「' + esc(searchTerm) + '」相关的课程</div>';
     return;
   }
-  list.forEach((c) => {
+  filtered.forEach((c) => {
     const card = el("div", "course-card");
-    const cover = el("div", "course-cover", c.coverText);
-    cover.style.background = c.coverColor;
+    const cover = courseCover(c);
+    const coverEl = el("div", "course-cover", cover.text);
+    coverEl.style.background = cover.color;
     const body = el("div", "course-body");
     const h4 = el("h4");
     h4.innerHTML = highlight(c.title, searchTerm);
     body.appendChild(h4);
-    body.appendChild(el("div", "course-meta", c.category + " · " + c.teacher));
+    body.appendChild(el("div", "course-meta", (c.category || "") + " · " + (c.teacher || "")));
     const prog = el("div", "progress");
     const span = el("span");
     const pct = NF(localStorage.getItem(uKey("progress", c.id))) || 0;
     span.style.width = pct + "%";
     prog.appendChild(span);
     body.appendChild(prog);
-    card.appendChild(cover);
+    card.appendChild(coverEl);
     card.appendChild(body);
     card.onclick = () => openCourse(c.id);
     grid.appendChild(card);
@@ -608,9 +863,9 @@ $("#topSearch").addEventListener("input", (e) => {
 });
 
 /* ---------------- 学习页 ---------------- */
-function openCourse(id, skipNav, targetTab) {
-  const c = COURSES.find((x) => x.id === id);
-  if (!c) return;
+async function openCourse(id, skipNav, targetTab) {
+  const c = await loadCourse(id);
+  if (!c) { toast("课程加载失败，请稍后重试"); return; }
   activeNav = "learn";
   renderNav();
   showCrumb([
@@ -647,7 +902,12 @@ function renderLearn(v, c, targetTab) {
   header.appendChild(titleWrap);
   v.appendChild(header);
 
-  if (!c.sections || c.sections.length === 0) {
+  // 空课程判定：章节、作业、公告全空才算「老师未上传数据」。
+  // 只要有一项内容（例如只有公告）就正常渲染，保证通知跳转过来的公告页可读。
+  const hasAny = (c.sections && c.sections.length)
+    || (c.homeworks && c.homeworks.length)
+    || (c.announcements && c.announcements.length);
+  if (!hasAny) {
     const empty = el("div", "card");
     empty.style.textAlign = "center"; empty.style.padding = "64px 20px"; empty.style.color = "var(--text-3)";
     empty.innerHTML = '<div style="font-size:46px;opacity:.6">📭</div>' +
@@ -656,6 +916,8 @@ function renderLearn(v, c, targetTab) {
     v.appendChild(empty);
     return;
   }
+  if (!c.sections) c.sections = [];   // 无章节时后续 filter 仍可安全执行
+  if (!c.homeworks) c.homeworks = [];
 
   const learn = el("div", "learn");
   const chapter = el("div", "chapter");
@@ -748,10 +1010,13 @@ function renderLearn(v, c, targetTab) {
     { key: "doc", label: "资料", show: docs.length },
     { key: "quiz", label: "章节测验", show: quizzes.length },
     { key: "homework", label: "作业", show: (c.homeworks || []).length },
+    { key: "announcements", label: "公告" + ((c.announcements || []).length ? " · " + c.announcements.length : ""), show: true },
     { key: "discussion", label: "课程讨论", show: true },
   ];
   let curTab = "video";
   if (targetTab) curTab = targetTab;
+  // 目标 tab 可能因内容为空而不存在（如课程暂无资料），回落到视频，避免空白页
+  if (!tabDefs.some((t) => t.key === curTab && t.show)) curTab = videos.length ? "video" : (docs.length ? "doc" : "announcements");
 
   function buildRecs(recs, key) {
     const box = el("div", "video-recs");
@@ -824,13 +1089,13 @@ function renderLearn(v, c, targetTab) {
       docs.forEach((s) => {
         const row = el("div", "doc-row");
         const info = el("div", "doc-info");
-        info.innerHTML = '<div class="li-ic" data-icon="file-text"> </div><div class="li-body"><h4>' + esc(s.title) + '</h4><p>课件 / 讲义</p></div>';
+        info.innerHTML = '<div class="li-ic" data-icon="file-text"> </div><div class="li-body"><h4>' + esc(s.title) + '</h4><p>' + esc(docTypeLabel(s.content)) + '</p></div>';
         const actions = el("div", "doc-actions");
         const viewBtn = el("a", "btn sm");
-        viewBtn.href = s.content; viewBtn.target = "_blank";
+        viewBtn.href = previewUrl(s.content, s.title); viewBtn.target = "_blank";
         viewBtn.textContent = "在线预览";
         const dlBtn = el("a", "btn sm ghost");
-        dlBtn.href = s.content; dlBtn.download = s.title + ".html";
+        dlBtn.href = s.content; dlBtn.download = downloadName(s.title, s.content);
         dlBtn.textContent = "下载";
         actions.appendChild(viewBtn); actions.appendChild(dlBtn);
         row.appendChild(info); row.appendChild(actions);
@@ -845,6 +1110,9 @@ function renderLearn(v, c, targetTab) {
     } else if (curTab === "homework") {
       renderHomeworkPanel(panel, c);
       chapter.innerHTML = '<div class="ch">作业列表</div><div class="item active">' + ((c.homeworks || []).length) + " 项作业</div>";
+    } else if (curTab === "announcements") {
+      renderAnnouncements(panel, c);
+      chapter.innerHTML = '<div class="ch">课程公告</div><div class="item active">' + ((c.announcements || []).length) + " 条公告</div>";
     } else {
       renderDiscussion(panel, c);
       chapter.innerHTML = '<div class="ch">讨论区</div><div class="item active">课程讨论</div>';
@@ -864,6 +1132,30 @@ function renderLearn(v, c, targetTab) {
   learn.appendChild(panel);
   v.appendChild(learn);
   renderTab();
+}
+
+/* ---------------- 课程公告（教师端发布 → 学生端阅读） ---------------- */
+// 公告随课程详情返回（/api/courses/{cid} 的 announcements 字段），
+// 点击通知中心的「新公告」会直接定位到本标签页。
+function renderAnnouncements(panel, c) {
+  panel.appendChild(el("h3", null, "课程公告"));
+  const list = c.announcements || [];
+  if (!list.length) {
+    const empty = el("div", "muted");
+    empty.style.cssText = "padding:30px 0;text-align:center;font-size:13px";
+    empty.textContent = "老师暂未发布公告，发布后会在这里同步显示。";
+    panel.appendChild(empty);
+    return;
+  }
+  list.forEach((a) => {
+    const card = el("div", "ann-card");
+    card.innerHTML =
+      '<div class="ann-head"><b>' + esc(a.title) + "</b>" +
+        '<span class="ann-time">' + esc(a.created_at || "") + "</span></div>" +
+      '<div class="ann-body">' + esc(a.content || "").replace(/\n/g, "<br>") + "</div>" +
+      '<div class="ann-foot">' + esc(a.author || "教师") + " 发布</div>";
+    panel.appendChild(card);
+  });
 }
 
 /* ---------------- 课程作业（已接入后端 homeworks 状态） ---------------- */
@@ -983,10 +1275,11 @@ function refreshProgressLabel(c, ratio) {
   if (sub) sub.textContent = c.category + " · " + c.teacher + " · 进度 " + ratio + "%";
 }
 
-/* ---------------- 章节测验（可交互） ---------------- */
-function quizKey(c, qIdx) { return uKey("quiz", c.id) + "_" + qIdx; }
+/* ---------------- 章节测验（阶段一：服务端判分，前端不持有答案） ---------------- */
+function quizKey(c, key) { return uKey("quiz", c.id) + "_" + key; }
 
-function renderQuizPanel(panel, c) {
+// 章节测验面板：优先读服务端提交记录，否则展示作答表单
+async function renderQuizPanel(panel, c) {
   panel.innerHTML = "";
   panel.appendChild(el("h3", null, "章节测验"));
   const quizzes = c.sections.filter((s) => s.stype === "quiz");
@@ -994,109 +1287,124 @@ function renderQuizPanel(panel, c) {
     panel.appendChild(el("div", "muted", "暂无测验"));
     return;
   }
-  quizzes.forEach((quiz, qIdx) => {
+  for (const quiz of quizzes) {
     const wrap = el("div", "quiz-card");
-    const head = el("div", "quiz-head", quiz.title);
-    wrap.appendChild(head);
-    const stored = lsGet(quizKey(c, qIdx), null);
-
-    if (stored && stored.submitted) {
-      const pct = Math.round((stored.score / quiz.questions.length) * 100);
-      const summary = el("div", "quiz-summary");
-      const circle = el("div", "quiz-score-circle");
-      circle.style.background = "conic-gradient(var(--success) 0 " + pct + "%, var(--bg-2) " + pct + "% 100%)";
-      circle.innerHTML = "<span>" + pct + "%</span>";
-      const info = el("div", "quiz-score-info");
-      info.innerHTML =
-        '<div class="quiz-score-num">得分 ' + stored.score + ' / ' + quiz.questions.length + '</div>' +
-        '<div class="quiz-score-time">' + (stored.at ? "提交于 " + stored.at.slice(0, 10) + " " + stored.at.slice(11, 16) : "已提交") + '</div>';
-      summary.appendChild(circle);
-      summary.appendChild(info);
-      wrap.appendChild(summary);
-
-      const hint = el("div", "quiz-hint");
-      hint.textContent = "这是你的上次作答记录，题目答案默认隐藏，可点击查看解析。";
-      wrap.appendChild(hint);
-
-      const actions = el("div", "quiz-actions");
-      const viewBtn = el("button", "btn sm", "查看解析");
-      const resetBtn = el("button", "btn sm ghost", "重新测验");
-      actions.appendChild(viewBtn);
-      actions.appendChild(resetBtn);
-      wrap.appendChild(actions);
-
-      viewBtn.onclick = () => renderQuizReview(wrap, quiz, stored, c, qIdx, panel);
-      resetBtn.onclick = () => {
-        if (!confirm("重新测验将清空本次作答记录，确定吗？")) return;
-        lsSet(quizKey(c, qIdx), null);
-        renderQuizPanel(panel, c);
-      };
-
-      panel.appendChild(wrap);
-      return;
-    }
-
-    const form = el("div", "quiz-form");
-    quiz.questions.forEach((q, i) => {
-      const qbox = el("div", "quiz-q");
-      qbox.innerHTML = '<div class="quiz-qq"><span class="quiz-no">Q' + (i + 1) + '</span>' + esc(q.q) + '</div>';
-      const opts = el("div", "quiz-opts");
-      q.options.forEach((opt, j) => {
-        const lab = el("label", "quiz-opt");
-        lab.innerHTML = '<input type="radio" name="q_' + c.id + '_' + qIdx + '_' + i + '" value="' + j + '"><span>' + esc(opt) + '</span>';
-        opts.appendChild(lab);
-      });
-      qbox.appendChild(opts);
-      form.appendChild(qbox);
-    });
-    const submit = el("button", "btn", "提交测验");
-    submit.onclick = () => {
-      let score = 0;
-      const answers = [];
-      quiz.questions.forEach((q, i) => {
-        const sel = form.querySelector('input[name="q_' + c.id + '_' + qIdx + '_' + i + '"]:checked');
-        const val = sel ? Number(sel.value) : -1;
-        answers.push(val);
-        if (val === q.answer) score++;
-      });
-      lsSet(quizKey(c, qIdx), { submitted: true, score: score, total: quiz.questions.length, answers: answers, at: new Date().toISOString() });
-      // 阶段二：后台上报测验成绩到后端（不阻塞 UI）；置空看板缓存以触发下次刷新
-      try {
-        API.reportQuiz(c.id, qIdx, quiz.title, score, quiz.questions.length)
-          .then(() => { DASH_BACKEND = null; }).catch(() => {});
-      } catch (e) {}
-      if (pages.dashboard) renderDashboard(pages.dashboard);
-      renderQuizPanel(panel, c);
-      toast("测验已提交，得分 " + score + "/" + quiz.questions.length);
-    };
-    form.appendChild(submit);
-    wrap.appendChild(form);
     panel.appendChild(wrap);
-  });
+    let res = null;
+    try { res = await API.getQuizResult(quiz.id); } catch (e) {}
+    if (res && res.submitted) {
+      renderQuizSummary(wrap, quiz, res, c, panel);
+    } else {
+      renderQuizForm(wrap, quiz, c, panel);
+    }
+  }
 }
 
-function renderQuizReview(wrap, quiz, stored, c, qIdx, panel) {
+// 作答表单（提交后由服务端判分）
+function renderQuizForm(wrap, quiz, c, panel) {
+  wrap.innerHTML = "";
+  wrap.appendChild(el("div", "quiz-head", quiz.title));
+  const hint = el("div", "quiz-hint");
+  hint.textContent = "请独立完成，提交后由系统判分。";
+  wrap.appendChild(hint);
+  const form = el("div", "quiz-form");
+  (quiz.questions || []).forEach((q, i) => {
+    const qbox = el("div", "quiz-q");
+    qbox.innerHTML = '<div class="quiz-qq"><span class="quiz-no">Q' + (i + 1) + '</span>' + esc(qText(q)) + '</div>';
+    const opts = el("div", "quiz-opts");
+    q.options.forEach((opt, j) => {
+      const lab = el("label", "quiz-opt");
+      lab.innerHTML = '<input type="radio" name="q_' + quiz.id + '_' + i + '" value="' + j + '"><span>' + esc(opt) + '</span>';
+      opts.appendChild(lab);
+    });
+    qbox.appendChild(opts);
+    form.appendChild(qbox);
+  });
+  const submit = el("button", "btn", "提交测验");
+  submit.onclick = async () => {
+    submit.disabled = true;
+    const answers = [];
+    (quiz.questions || []).forEach((q, i) => {
+      const sel = form.querySelector('input[name="q_' + quiz.id + '_' + i + '"]:checked');
+      answers.push(sel ? Number(sel.value) : -1);
+    });
+    try {
+      const res = await API.submitQuiz(quiz.id, answers);
+      lsSet(quizKey(c, quiz.id), res);
+      if (pages.dashboard) renderDashboard(pages.dashboard);
+      renderQuizSummary(wrap, quiz, res, c, panel);
+      toast("测验已提交，得分 " + res.score + "/" + res.total);
+    } catch (e) {
+      toast(e.message || "提交失败");
+      submit.disabled = false;
+    }
+  };
+  form.appendChild(submit);
+  wrap.appendChild(form);
+}
+
+// 已提交：得分概览 + 查看解析 / 重新测验
+function renderQuizSummary(wrap, quiz, res, c, panel) {
+  wrap.innerHTML = "";
+  wrap.appendChild(el("div", "quiz-head", quiz.title));
+  const total = res.total || (quiz.questions ? quiz.questions.length : 0);
+  const pct = total ? Math.round((res.score / total) * 100) : 0;
+  const summary = el("div", "quiz-summary");
+  const circle = el("div", "quiz-score-circle");
+  circle.style.background = "conic-gradient(var(--success) 0 " + pct + "%, var(--bg-2) " + pct + "% 100%)";
+  circle.innerHTML = "<span>" + pct + "%</span>";
+  const info = el("div", "quiz-score-info");
+  const at = res.submitted_at ? res.submitted_at.replace("T", " ").slice(0, 16) : "已提交";
+  info.innerHTML =
+    '<div class="quiz-score-num">得分 ' + res.score + ' / ' + total + '</div>' +
+    '<div class="quiz-score-time">提交于 ' + at + '</div>';
+  summary.appendChild(circle);
+  summary.appendChild(info);
+  wrap.appendChild(summary);
+
+  const hint = el("div", "quiz-hint");
+  hint.textContent = "这是你的作答记录，可点击查看解析。";
+  wrap.appendChild(hint);
+
+  const actions = el("div", "quiz-actions");
+  const viewBtn = el("button", "btn sm", "查看解析");
+  const resetBtn = el("button", "btn sm ghost", "重新测验");
+  actions.appendChild(viewBtn);
+  actions.appendChild(resetBtn);
+  wrap.appendChild(actions);
+
+  viewBtn.onclick = () => renderQuizReview(wrap, quiz, res, c, panel);
+  resetBtn.onclick = () => {
+    if (!confirm("重新测验将清空本次作答记录，确定吗？")) return;
+    renderQuizForm(wrap, quiz, c, panel);
+  };
+}
+
+// 解析页：正确答案与用户作答均来自服务端返回（前端无标准答案）
+function renderQuizReview(wrap, quiz, res, c, panel) {
   wrap.innerHTML = '<div class="quiz-head">' + esc(quiz.title) + ' · 解析</div>';
-  quiz.questions.forEach((q, i) => {
-    const userAns = (stored.answers && stored.answers[i] != null) ? stored.answers[i] : -1;
-    const isCorrect = userAns === q.answer;
+  (quiz.questions || []).forEach((q, i) => {
+    const r = (res.results && res.results[i]) || {};
+    const userAns = (res.answers && res.answers[i] != null) ? res.answers[i] : -1;
+    const isCorrect = !!r.correct;
     const qbox = el("div", "quiz-q quiz-review" + (isCorrect ? " correct" : " wrong"));
     qbox.innerHTML =
-      '<div class="quiz-qq"><span class="quiz-no">Q' + (i + 1) + '</span>' + esc(q.q) + '</div>' +
+      '<div class="quiz-qq"><span class="quiz-no">Q' + (i + 1) + '</span>' + esc(qText(q)) + '</div>' +
       '<div class="quiz-status">' + (isCorrect ? "✓ 回答正确" : (userAns < 0 ? "✗ 未作答" : "✗ 回答错误")) + '</div>';
     const opts = el("div", "quiz-opts");
     q.options.forEach((opt, j) => {
       const row = el("div", "quiz-opt-row");
-      if (j === q.answer) row.classList.add("right");
-      if (j === userAns && j !== q.answer) row.classList.add("picked-wrong");
+      if (j === r.answer) row.classList.add("right");
+      if (j === userAns && j !== r.answer) row.classList.add("picked-wrong");
       row.innerHTML = '<span class="quiz-opt-letter">' + String.fromCharCode(65 + j) + '</span><span>' + esc(opt) + '</span>';
       opts.appendChild(row);
     });
     qbox.appendChild(opts);
-    if (q.explanation) {
-      const exp = el("div", "quiz-exp");
-      exp.innerHTML = '<b>解析：</b>' + esc(q.explanation);
-      qbox.appendChild(exp);
+    const exp = r.explanation || q.explanation;
+    if (exp) {
+      const e = el("div", "quiz-exp");
+      e.innerHTML = '<b>解析：</b>' + esc(exp);
+      qbox.appendChild(e);
     }
     wrap.appendChild(qbox);
   });
@@ -1466,6 +1774,10 @@ function renderDashboard(v) {
       if (pages.dashboard === v) renderDashboard(pages.dashboard);
     }).catch(() => {});
   }
+  // 阶段一：同步拉取课程列表（后端为唯一真源），拿到后刷新看板课程集合
+  if (!COURSE_LIST_CACHE) {
+    loadCourseList().then(() => { if (pages.dashboard === v) renderDashboard(v); }).catch(() => {});
+  }
   v.appendChild(el("div", "h-title", "学情看板"));
   v.appendChild(el("p", "h-sub", currentUser.name + " · " + currentUser.major + " · 学习概览"));
 
@@ -1473,7 +1785,7 @@ function renderDashboard(v) {
   let totalStudyMin = 0;
   let totalVideoNum = 0, totalVideoPct = 0;
   let totalScoreNum = 0, totalScoreSum = 0;
-  COURSES.forEach((c) => {
+  courseList().forEach((c) => {
     const st = getCourseStats(c);
     totalStudyMin += Math.round(st.studyHours * 60);
     totalVideoNum++; totalVideoPct += st.videoProg;
@@ -1509,7 +1821,7 @@ function renderDashboard(v) {
 
   // 待办 / 未掌握
   const tasks = [];
-  COURSES.forEach((c) => {
+  courseList().forEach((c) => {
     const st = getCourseStats(c);
     if (st.videoProg < 100) tasks.push({ type: "video", text: "完成「" + c.title + "」视频学习（当前 " + st.videoProg + "%）", cid: c.id });
     if (st.totalQuiz && st.quizCount < st.totalQuiz) tasks.push({ type: "quiz", text: "完成「" + c.title + "」剩余章节测验", cid: c.id });
@@ -1557,7 +1869,7 @@ function renderDashboard(v) {
   // 课程进度明细
   const progressCard = el("div", "card dash-progress");
   progressCard.innerHTML = '<div class="h-title2">课程进度明细</div>';
-  COURSES.forEach((c) => {
+  courseList().forEach((c) => {
     const st = getCourseStats(c);
     const row = el("div", "hbar");
     row.innerHTML = '<div class="lab">' + esc(c.title) + '</div>' +
@@ -1874,19 +2186,26 @@ async function sendAI() {
 
 /* ---------------- 启动 ---------------- */
 (function init() {
-  // 铃铛
+  // 铃铛：打开面板时拉取真实通知（教师端/学生端共用同一入口）
   $("#bellBtn").addEventListener("click", (e) => {
+    // 点击面板内部（通知条目、按钮）不触发开关，否则会在跳转后又把面板重新打开
+    if ($("#notifyPanel").contains(e.target)) return;
     e.stopPropagation();
     const p = $("#notifyPanel");
-    p.classList.toggle("show");
-    renderNotif();
+    NOTIF.open = p.classList.toggle("show");
+    if (NOTIF.open) renderNotif();
   });
   document.addEventListener("click", (e) => {
     const p = $("#notifyPanel");
-    if (p && !$("#bellBtn").contains(e.target)) p.classList.remove("show");
+    if (p && !$("#bellBtn").contains(e.target)) { p.classList.remove("show"); NOTIF.open = false; }
     const am = $("#avatarMenu");
     if (am && !$("#topAvatar").parentNode.contains(e.target)) am.classList.remove("show");
   });
+  // 切回标签页时立刻刷新未读数，避免"回到页面才发现有新消息"
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && currentUser) pollNotif();
+  });
+  window.addEventListener("focus", () => { if (currentUser) pollNotif(); });
 
   document.querySelectorAll("#profileTabs .tab").forEach((t) => {
     t.addEventListener("click", () => renderProfileTab(t.getAttribute("data-tab")));
@@ -1923,3 +2242,783 @@ async function sendAI() {
 
   initIcons();
 })();
+
+/* =========================================================
+ * 教师端模块（routers/teacher.py 的前端实现）
+ * 入口：role === "teacher" 时，showApp/navigate 进入 "t_courses"。
+ * 安全：全部接口依赖后端 require_teacher 守卫与课程行级隔离，前端仅负责展示与调用。
+ * ========================================================= */
+let T_COURSE = null;   // 当前管理的课程对象 {id,title,code,category,student_count,...}
+let T_TAB = "sections"; // 课程详情当前 tab
+let T_HW = null;        // 作业批改：当前展开的作业 id
+let T_IMPORT = null;    // 最近一次学生导入结果 {cid, data}，用于在学生页展示逐行原因
+
+// 教师端前端缓存：避免每次切换 tab 重复拉接口；删除课程/退出时 clearAll 重置。
+// 结构：courses(列表) / course[cid].sections / students[cid] / homeworks[cid]
+//       / dashboard[cid] / announcements[cid]。各渲染函数按 cid 读缓存，缺失才请求。
+const TeacherCache = {
+  courses: null,        // GET /api/teacher/courses
+  course: {},           // cid -> { sections: [...] }
+  students: {},         // cid -> [学生]
+  homeworks: {},        // cid -> [作业]
+  dashboard: {},        // cid -> 学情聚合
+  announcements: {},    // cid -> [公告]
+  clearAll() {
+    this.courses = null;
+    this.course = {};
+    this.students = {};
+    this.homeworks = {};
+    this.dashboard = {};
+    this.announcements = {};
+  },
+};
+
+function isTeacher() { return !!(currentUser && currentUser.role === "teacher"); }
+
+// 通用表格 HTML 构造（cells 已是转义后的 HTML 字符串）
+function tTable(headers, rows) {
+  let h = '<table class="t-table"><thead><tr>' +
+    headers.map((x) => "<th>" + x + "</th>").join("") + "</tr></thead><tbody>";
+  if (!rows.length) {
+    h += '<tr><td colspan="' + headers.length + '" style="text-align:center;color:var(--text-3);padding:24px">暂无数据</td></tr>';
+  } else {
+    h += rows.map((r) => "<tr>" + r.map((c) => "<td>" + c + "</td>").join("") + "</tr>").join("");
+  }
+  return h + "</tbody></table>";
+}
+
+/* ---------------- 课程列表 + 课程详情壳 ---------------- */
+async function renderTeacherCourses(v) {
+  if (T_COURSE) { renderTeacherCourseDetail(v); return; }
+  v.innerHTML = "";
+  v.appendChild(el("div", "h-title", "我的课程"));
+  v.appendChild(el("p", "h-sub", (currentUser.name || "老师") + "，管理你开设的通识课程"));
+
+  const bar = el("div", "t-toolbar");
+  const newBtn = el("button", "btn", "＋ 新建课程");
+  newBtn.onclick = () => toggleTeacherCourseForm($("#tCourseForm"), null);
+  bar.appendChild(newBtn);
+  v.appendChild(bar);
+
+  const formHost = el("div"); formHost.id = "tCourseForm"; v.appendChild(formHost);
+  const grid = el("div", "course-grid"); grid.id = "tCourseGrid"; v.appendChild(grid);
+  await loadTeacherCourses(grid);
+}
+
+async function loadTeacherCourses(grid) {
+  grid.innerHTML = '<div class="muted2">加载中…</div>';
+  try {
+    const list = await API.teacherCourses();
+    TeacherCache.courses = list;
+    if (!list.length) {
+      grid.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-3)">还没有课程，点击「新建课程」开始。</div>';
+      return;
+    }
+    grid.innerHTML = "";
+    list.forEach((c) => grid.appendChild(teacherCourseCard(c)));
+  } catch (e) {
+    grid.innerHTML = '<div class="card" style="grid-column:1/-1;color:var(--danger)">加载失败：' + esc(e.message) + "</div>";
+  }
+}
+
+function teacherCourseCard(c) {
+  const card = el("div", "course-card");
+  const cover = el("div", "course-cover", c.cover || "📘");
+  cover.style.background = "var(--primary)";
+  const body = el("div", "course-body");
+  const h = el("h4"); h.textContent = c.title; body.appendChild(h);
+  body.appendChild(el("div", "course-meta", (c.code || "") + (c.code ? " · " : "") + (c.category || "")));
+  body.appendChild(el("div", "course-meta", "学生 " + (c.student_count || 0) + " 人"));
+  const act = el("div");
+  act.style.marginTop = "10px"; act.style.display = "flex"; act.style.gap = "8px"; act.style.flexWrap = "wrap";
+  const m = el("button", "btn", "管理"); m.onclick = () => openTeacherCourse(c.id);
+  const ed = el("button", "btn ghost", "编辑");
+  ed.onclick = () => toggleTeacherCourseForm($("#tCourseForm"), c);
+  const del = el("button", "btn ghost", "删除"); del.style.color = "var(--danger)";
+  del.onclick = async () => {
+    if (!confirm("确定删除课程《" + c.title + "》？将级联删除章节/作业/签到/公告，不可恢复。")) return;
+    try { await API.teacherDeleteCourse(c.id); TeacherCache.clearAll(); toast("已删除"); navigate("t_courses"); }
+    catch (e) { toast(e.message); }
+  };
+  act.appendChild(m); act.appendChild(ed); act.appendChild(del);
+  body.appendChild(act);
+  card.appendChild(cover); card.appendChild(body);
+  return card;
+}
+
+function toggleTeacherCourseForm(host, course) {
+  if (!host) return;
+  if (host._open && !course) { host.innerHTML = ""; host._open = false; return; }
+  host._open = true;
+  const c = course || {};
+  host.innerHTML =
+    '<div class="t-form">' +
+      '<div><label>课程名称 *</label><input id="cf_title" value="' + esc(c.title || "") + '" placeholder="如：数据科学导论"></div>' +
+      '<div><label>课程代码</label><input id="cf_code" value="' + esc(c.code || "") + '" placeholder="如：CS101"></div>' +
+      '<div><label>教师</label><input id="cf_teacher" value="' + esc(c.teacher || currentUser.name || "") + '"></div>' +
+      '<div><label>分类</label><input id="cf_category" value="' + esc(c.category || "通识课") + '"></div>' +
+      '<div class="full"><label>简介</label><textarea id="cf_desc" rows="2">' + esc(c.desc || "") + '</textarea></div>' +
+      '<div class="full"><button class="btn" id="cf_save">' + (course ? "保存修改" : "创建课程") + '</button>' +
+      (course ? '<button class="btn ghost" id="cf_cancel">取消</button>' : "") +
+      ' <span class="muted2" id="cf_msg"></span></div>' +
+    '</div>';
+  document.getElementById("cf_save").onclick = async () => {
+    const body = {
+      title: document.getElementById("cf_title").value.trim(),
+      code: document.getElementById("cf_code").value.trim(),
+      teacher: document.getElementById("cf_teacher").value.trim(),
+      category: document.getElementById("cf_category").value.trim(),
+      desc: document.getElementById("cf_desc").value.trim(),
+    };
+    if (!body.title) { document.getElementById("cf_msg").textContent = "请填写课程名称"; return; }
+    try {
+      if (course) await API.teacherUpdateCourse(course.id, body);
+      else await API.teacherCreateCourse(body);
+      TeacherCache.courses = null;
+      host.innerHTML = ""; host._open = false;
+      toast(course ? "已保存" : "已创建");
+      navigate("t_courses");
+    } catch (e) { document.getElementById("cf_msg").textContent = e.message; }
+  };
+  const cancel = document.getElementById("cf_cancel");
+  if (cancel) cancel.onclick = () => { host.innerHTML = ""; host._open = false; };
+}
+
+async function openTeacherCourse(cid, tab) {
+  let c = (TeacherCache.courses || []).find((x) => x.id === cid);
+  if (!c) { try { const list = await API.teacherCourses(); TeacherCache.courses = list; c = list.find((x) => x.id === cid); } catch (e) {} }
+  if (!c) c = { id: cid, title: "课程" + cid };
+  const validTabs = ["sections", "students", "grading", "dashboard", "signin", "announcements"];
+  T_COURSE = c;
+  T_TAB = validTabs.indexOf(tab) >= 0 ? tab : "sections";  // 通知点击可直达「作业批改」等 Tab
+  T_HW = null;
+  navigate("t_courses");
+}
+
+function renderTeacherCourseDetail(v) {
+  const c = T_COURSE;
+  v.innerHTML = "";
+  const back = el("button", "btn ghost", "← 我的课程");
+  back.onclick = () => { T_COURSE = null; T_HW = null; navigate("t_courses"); };
+  v.appendChild(back);
+
+  const head = el("div", "t-section");
+  head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.alignItems = "center";
+  const htxt = el("div");
+  htxt.innerHTML = '<div style="font-size:20px;font-weight:800">' + esc(c.title) + '</div>' +
+    '<div class="muted2">' + esc(c.code || "") + (c.code ? " · " : "") + "学生 " + (c.student_count || 0) + " 人</div>";
+  head.appendChild(htxt);
+  const del = el("button", "btn ghost", "删除课程"); del.style.color = "var(--danger)";
+  del.onclick = async () => {
+    if (!confirm("确定删除《" + c.title + "》？")) return;
+    try { await API.teacherDeleteCourse(c.id); TeacherCache.clearAll(); T_COURSE = null; toast("已删除"); navigate("t_courses"); }
+    catch (e) { toast(e.message); }
+  };
+  head.appendChild(del);
+  v.appendChild(head);
+
+  const tabs = el("div", "tabs");
+  const tabsDef = [
+    ["sections", "章节"], ["students", "学生"], ["grading", "作业批改"],
+    ["dashboard", "学情"], ["signin", "签到"], ["announcements", "公告"],
+  ];
+  tabsDef.forEach(([k, label]) => {
+    const t = el("div", "tab" + (k === T_TAB ? " cur" : ""), label);
+    t.onclick = () => { T_TAB = k; renderTeacherCourseDetail(v); };
+    tabs.appendChild(t);
+  });
+  v.appendChild(tabs);
+
+  const body = el("div", "tab-body"); v.appendChild(body);
+  if (T_TAB === "sections") renderTeacherSections(body, c);
+  else if (T_TAB === "students") renderTeacherStudents(body, c);
+  else if (T_TAB === "grading") renderTeacherGrading(body, c);
+  else if (T_TAB === "dashboard") renderTeacherDashboard(body, c);
+  else if (T_TAB === "signin") renderTeacherSignin(body, c);
+  else if (T_TAB === "announcements") renderTeacherAnnouncements(body, c);
+}
+
+/* ---------------- Tab: 章节 ---------------- */
+async function renderTeacherSections(v, c) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  let list = TeacherCache.course[c.id] && TeacherCache.course[c.id].sections;
+  if (!list) {
+    try {
+      list = await API.teacherSections(c.id);
+      TeacherCache.course[c.id] = TeacherCache.course[c.id] || {};
+      TeacherCache.course[c.id].sections = list;
+    } catch (e) { v.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; return; }
+  }
+  v.innerHTML = "";
+  const bar = el("div", "t-toolbar");
+  const add = el("button", "btn", "＋ 添加章节");
+  add.onclick = () => toggleSectionForm(v, c, null);
+  bar.appendChild(add);
+  v.appendChild(bar);
+  const host = el("div"); host.id = "secForm"; v.appendChild(host);
+
+  if (!list.length) { v.appendChild(el("div", "muted2", "暂无章节，点击「添加章节」添加视频 / 课件 / 测验。")); return; }
+  list.forEach((s) => v.appendChild(sectionRow(s, c)));
+}
+
+function stypeBadge(t, count) {
+  if (t === "quiz") return '<span class="badge gray">测验 · ' + (count || 0) + ' 题</span>';
+  const map = { video: ["视频", "green"], doc: ["课件", ""] };
+  const [txt, cls] = map[t] || ["其它", "gray"];
+  return '<span class="badge ' + cls + '">' + txt + "</span>";
+}
+
+function sectionRow(s, c) {
+  const row = el("div", "t-row");
+  const left = el("div");
+  left.innerHTML = '<b>' + esc(s.title) + "</b> " + stypeBadge(s.stype, s.question_count) +
+    (s.content ? ' <span class="muted2">' + esc(s.content) + "</span>" : "");
+  const right = el("div"); right.style.display = "flex"; right.style.gap = "8px";
+  if (s.stype === "quiz") {
+    const qm = el("button", "btn ghost", "出题");
+    qm.onclick = () => renderTeacherQuestions(document.querySelector(".tab-body"), c, s);
+    right.appendChild(qm);
+  }
+  // 课件/视频：老师也能用与学生完全相同的预览页，避免"学生看到的是另一副样子"
+  if (s.stype !== "quiz" && s.content) {
+    const pv = el("button", "btn ghost", "预览");
+    pv.onclick = () => window.open(previewUrl(s.content, s.title), "_blank");
+    right.appendChild(pv);
+  }
+  const ed = el("button", "btn ghost", "编辑");
+  ed.onclick = () => toggleSectionForm(document.getElementById("secForm"), c, s);
+  const del = el("button", "btn ghost", "删除"); del.style.color = "var(--danger)";
+  del.onclick = async () => {
+    if (!confirm("删除章节《" + s.title + "》？")) return;
+    try { await API.teacherDeleteSection(s.id); TeacherCache.course[c.id] = undefined; toast("已删除"); renderTeacherSections(document.getElementById("tTabBody") || document.querySelector(".tab-body"), c); }
+    catch (e) { toast(e.message); }
+  };
+  right.appendChild(ed); right.appendChild(del);
+  row.appendChild(left); row.appendChild(right);
+  return row;
+}
+
+function toggleSectionForm(v, c, sec) {
+  const host = document.getElementById("secForm");
+  if (!host) return;
+  if (host._open && !sec) { host.innerHTML = ""; host._open = false; return; }
+  host._open = true;
+  const s = sec || {};
+  host.innerHTML =
+    '<div class="t-form">' +
+      '<div class="full"><label>章节标题 *</label><input id="sf_title" value="' + esc(s.title || "") + '"></div>' +
+      '<div><label>类型</label><select id="sf_stype">' +
+        '<option value="video"' + (s.stype === "video" ? " selected" : "") + '>视频</option>' +
+        '<option value="doc"' + (s.stype === "doc" ? " selected" : "") + '>课件</option>' +
+        '<option value="quiz"' + (s.stype === "quiz" ? " selected" : "") + '>测验</option>' +
+      '</select></div>' +
+      '<div><label>内容地址/链接</label><input id="sf_content" value="' + esc(s.content || "") + '" placeholder="如 /files/xxx.mp4 或外链"></div>' +
+      '<div class="full"><label>上传资料（可选，将覆盖上方内容地址）</label><input type="file" id="sf_file"></div>' +
+      '<div class="full"><button class="btn" id="sf_save">' + (sec ? "保存修改" : "添加章节") + '</button>' +
+      (sec ? '<button class="btn ghost" id="sf_cancel">取消</button>' : "") +
+      ' <span class="muted2" id="sf_msg"></span></div>' +
+    '</div>';
+  document.getElementById("sf_save").onclick = async () => {
+    const title = document.getElementById("sf_title").value.trim();
+    if (!title) { document.getElementById("sf_msg").textContent = "请填写章节标题"; return; }
+    let content = document.getElementById("sf_content").value.trim();
+    const fileInput = document.getElementById("sf_file");
+    try {
+      if (fileInput.files && fileInput.files[0]) {
+        const up = await API.teacherUpload(fileInput.files[0]);
+        content = up.url;
+      }
+      const body = { title, stype: document.getElementById("sf_stype").value, content, position: 0 };
+      if (sec) await API.teacherUpdateSection(sec.id, body);
+      else await API.teacherAddSection(c.id, body);
+      TeacherCache.course[c.id] = undefined;
+      host.innerHTML = ""; host._open = false;
+      toast(sec ? "已保存" : "已添加");
+      renderTeacherSections(document.querySelector(".tab-body"), c);
+    } catch (e) { document.getElementById("sf_msg").textContent = e.message; }
+  };
+  const cancel = document.getElementById("sf_cancel");
+  if (cancel) cancel.onclick = () => { host.innerHTML = ""; host._open = false; };
+}
+
+/* ---------------- 测验出题（章节题库管理） ---------------- */
+async function renderTeacherQuestions(v, c, sec) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  const bar = el("div", "t-toolbar");
+  const back = el("button", "btn ghost", "← 返回章节");
+  back.onclick = () => { TeacherCache.course[c.id] = undefined; renderTeacherSections(v, c); };
+  bar.appendChild(back);
+  const add = el("button", "btn", "＋ 添加题目");
+  add.onclick = () => toggleQuestionForm(v, c, sec, null);
+  bar.appendChild(add);
+  v.appendChild(bar);
+  const host = el("div"); host.id = "qForm"; v.appendChild(host);
+
+  let list;
+  try {
+    list = await API.teacherQuestions(sec.id);
+  } catch (e) { v.appendChild(el("div", "card", "加载失败：" + esc(e.message))); return; }
+
+  const wrap = el("div"); v.appendChild(wrap);
+  if (!list.length) { wrap.appendChild(el("div", "muted2", "暂无题目，点击「添加题目」开始出题。")); return; }
+  list.forEach((q) => {
+    const card = el("div", "t-section");
+    const top = el("div");
+    top.style.display = "flex"; top.style.justifyContent = "space-between"; top.style.alignItems = "center";
+    const optsPreview = (q.options || []).map((o, i) => String.fromCharCode(65 + i) + ". " + o).join("　");
+    top.innerHTML = "<div><b>Q" + (q.q_order + 1) + ".</b> " + esc(q.q_text) +
+      ' <span class="badge gray">答案 ' + String.fromCharCode(65 + (q.answer || 0)) + '</span></div>';
+    const right = el("div"); right.style.display = "flex"; right.style.gap = "8px";
+    const ed = el("button", "btn ghost", "编辑");
+    ed.onclick = () => toggleQuestionForm(v, c, sec, q);
+    const del = el("button", "btn ghost", "删除"); del.style.color = "var(--danger)";
+    del.onclick = async () => {
+      if (!confirm("删除该题？")) return;
+      try { await API.teacherDeleteQuestion(q.id); toast("已删除"); renderTeacherQuestions(v, c, sec); }
+      catch (e) { toast(e.message); }
+    };
+    right.appendChild(ed); right.appendChild(del);
+    top.appendChild(right);
+    card.appendChild(top);
+    card.appendChild(el("div", "muted2", optsPreview));
+    if (q.explanation) card.appendChild(el("div", null, "解析：" + q.explanation));
+    wrap.appendChild(card);
+  });
+}
+
+function toggleQuestionForm(v, c, sec, q) {
+  const host = document.getElementById("qForm");
+  if (!host) return;
+  if (host._open && !q) { host.innerHTML = ""; host._open = false; return; }
+  host._open = true;
+  const qq = q || {};
+  const opts = qq.options || ["", "", "", ""];
+  host.innerHTML =
+    '<div class="t-form">' +
+      '<div class="full"><label>题干 *</label><textarea id="qf_text" rows="2">' + esc(qq.q_text || "") + '</textarea></div>' +
+      '<div class="full"><label>选项 A</label><input id="qf_opt0" value="' + esc(opts[0] || "") + '"></div>' +
+      '<div class="full"><label>选项 B</label><input id="qf_opt1" value="' + esc(opts[1] || "") + '"></div>' +
+      '<div class="full"><label>选项 C（可选）</label><input id="qf_opt2" value="' + esc(opts[2] || "") + '"></div>' +
+      '<div class="full"><label>选项 D（可选）</label><input id="qf_opt3" value="' + esc(opts[3] || "") + '"></div>' +
+      '<div><label>正确答案</label><select id="qf_ans">' +
+        '<option value="0"' + ((qq.answer === 0) ? " selected" : "") + '>A</option>' +
+        '<option value="1"' + ((qq.answer === 1) ? " selected" : "") + '>B</option>' +
+        '<option value="2"' + ((qq.answer === 2) ? " selected" : "") + '>C</option>' +
+        '<option value="3"' + ((qq.answer === 3) ? " selected" : "") + '>D</option>' +
+      '</select></div>' +
+      '<div class="full"><label>解析（可选）</label><textarea id="qf_exp" rows="2">' + esc(qq.explanation || "") + '</textarea></div>' +
+      '<div class="full"><button class="btn" id="qf_save">' + (q ? "保存修改" : "添加题目") + '</button>' +
+      (q ? '<button class="btn ghost" id="qf_cancel">取消</button>' : "") +
+      ' <span class="muted2" id="qf_msg"></span></div>' +
+    '</div>';
+  document.getElementById("qf_save").onclick = async () => {
+    const qtext = document.getElementById("qf_text").value.trim();
+    if (!qtext) { document.getElementById("qf_msg").textContent = "请填写题干"; return; }
+    const optsArr = [0, 1, 2, 3].map((i) => document.getElementById("qf_opt" + i).value.trim()).filter((x) => x !== "");
+    if (optsArr.length < 2) { document.getElementById("qf_msg").textContent = "至少需要 2 个非空选项"; return; }
+    const ans = parseInt(document.getElementById("qf_ans").value, 10);
+    if (ans < 0 || ans >= optsArr.length) { document.getElementById("qf_msg").textContent = "正确选项超出了选项数量，请调整选项或答案"; return; }
+    const body = {
+      q_text: qtext,
+      options: optsArr,
+      answer: ans,
+      explanation: document.getElementById("qf_exp").value.trim(),
+    };
+    try {
+      if (q) await API.teacherUpdateQuestion(q.id, body);
+      else await API.teacherAddQuestion(sec.id, body);
+      host.innerHTML = ""; host._open = false;
+      toast(q ? "已保存" : "已添加");
+      renderTeacherQuestions(v, c, sec);
+    } catch (e) { document.getElementById("qf_msg").textContent = e.message; }
+  };
+  const cancel = document.getElementById("qf_cancel");
+  if (cancel) cancel.onclick = () => { host.innerHTML = ""; host._open = false; };
+}
+
+/* ---------------- Tab: 学生 ---------------- */
+async function renderTeacherStudents(v, c) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  let list = TeacherCache.students[c.id];
+  if (!list) {
+    try {
+      list = await API.teacherStudents(c.id);
+      TeacherCache.students[c.id] = list;
+    } catch (e) { v.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; return; }
+  }
+  v.innerHTML = "";
+  const bar = el("div", "t-toolbar");
+  const tpl = el("button", "btn ghost", "下载导入模板");
+  tpl.onclick = () => { try { API.teacherDownloadTemplate(c.id); } catch (e) { toast(e.message); } };
+  const imp = el("button", "btn ghost", "导入 Excel");
+  const impFile = document.createElement("input");
+  impFile.type = "file"; impFile.accept = ".xlsx,.xls"; impFile.style.display = "none";
+  impFile.onchange = () => importStudentsFile(c, impFile);
+  imp.onclick = () => impFile.click();
+  const add = el("button", "btn", "手动添加");
+  add.onclick = () => toggleStudentForm(v, c, null);
+  bar.appendChild(tpl); bar.appendChild(imp); bar.appendChild(impFile); bar.appendChild(add);
+  v.appendChild(bar);
+  const host = el("div"); host.id = "stuForm"; v.appendChild(host);
+  // 导入结果面板：逐行说明为什么被跳过，避免"跳过 1"却不知道原因
+  if (T_IMPORT && T_IMPORT.cid === c.id && T_IMPORT.data) {
+    v.appendChild(importResultPanel(c));
+  }
+
+  if (!list.length) { v.appendChild(el("div", "muted2", "暂无学生，可手动添加或导入 Excel（课程代码/名称可留空，默认进当前课程）。")); return; }
+  const rows = list.map((u) => {
+    const act = '<button class="btn ghost" data-rm="' + u.id + '">移除</button>';
+    return [esc(u.username), esc(u.name), esc(u.klass || ""), esc(u.major || ""), act];
+  });
+  const table = el("div");
+  table.innerHTML = tTable(["学号", "姓名", "班级", "专业", "操作"], rows);
+  table.querySelectorAll("[data-rm]").forEach((btn) => {
+    btn.onclick = async () => {
+      const uid = +btn.getAttribute("data-rm");
+      if (!confirm("从本课程移除该学生？")) return;
+      try { await API.teacherRemoveStudent(c.id, uid); TeacherCache.students[c.id] = undefined; toast("已移除"); renderTeacherStudents(v, c); }
+      catch (e) { toast(e.message); }
+    };
+  });
+  v.appendChild(table);
+}
+
+async function importStudentsFile(c, input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const r = await API.teacherImportStudents(file, c.id);
+    TeacherCache.students = {};
+    T_IMPORT = { cid: c.id, data: r };
+    const fail = (r.details || []).filter((d) => d.type !== "ok").length;
+    let msg = "导入完成：新建 " + r.created + "，加入课程 " + r.updated + "，跳过 " + r.skipped;
+    if (fail) msg += "（下方已列出原因）";
+    else if (!r.created && !r.updated) msg += "（没有可导入的行）";
+    toast(msg);
+    const body = document.querySelector(".tab-body");
+    if (body) renderTeacherStudents(body, c);
+  } catch (e) { toast(e.message); }
+  input.value = "";
+}
+
+// 导入结果面板：新建 / 加入 / 跳过 的逐行明细
+function importResultPanel(c) {
+  const r = T_IMPORT.data;
+  const box = el("div", "import-result");
+  const tone = (r.created || r.updated) ? "ok" : (r.skipped ? "warn" : "ok");
+  const head = el("div", "ir-head " + tone);
+  head.innerHTML = "<b>导入结果 · 《" + esc(c.title) + "》</b>" +
+    '<span class="ir-nums">新建 <b>' + r.created + "</b> · 加入课程 <b>" + r.updated +
+    "</b> · 跳过 <b>" + r.skipped + "</b></span>";
+  const close = el("button", "ir-close", "✕");
+  close.title = "关闭";
+  close.onclick = () => { T_IMPORT = null; const b = document.querySelector(".tab-body"); if (b) renderTeacherStudents(b, c); };
+  head.appendChild(close);
+  box.appendChild(head);
+
+  const list = el("div", "ir-list");
+  const details = r.details || [];
+  if (!details.length) {
+    list.innerHTML = '<div class="ir-row"><span class="ir-tag skip">提示</span><span>表格里没有数据行（只有表头或全为空行）。</span></div>';
+  }
+  details.forEach((d) => {
+    const row = el("div", "ir-row");
+    const tagCls = d.type === "ok" ? "ok" : (d.type === "error" ? "err" : "skip");
+    row.innerHTML = '<span class="ir-tag ' + tagCls + '">' + (d.type === "ok" ? "成功" : (d.type === "error" ? "未导入" : "跳过")) + "</span>" +
+      '<span class="ir-who">第' + d.row + "行" + (d.student ? " · " + esc(d.student) : "") + "</span>" +
+      "<span class=\"ir-why\">" + esc(d.reason) + "</span>";
+    list.appendChild(row);
+  });
+  box.appendChild(list);
+  return box;
+}
+
+function toggleStudentForm(v, c, stu) {
+  const host = document.getElementById("stuForm");
+  if (!host) return;
+  if (host._open && !stu) { host.innerHTML = ""; host._open = false; return; }
+  host._open = true;
+  const s = stu || {};
+  host.innerHTML =
+    '<div class="t-form">' +
+      '<div><label>学号 *</label><input id="stf_user" value="' + esc(s.username || "") + '"></div>' +
+      '<div><label>姓名 *</label><input id="stf_name" value="' + esc(s.name || "") + '"></div>' +
+      '<div><label>班级</label><input id="stf_class" value="' + esc(s.klass || "") + '"></div>' +
+      '<div><label>专业</label><input id="stf_major" value="' + esc(s.major || "") + '"></div>' +
+      '<div class="full"><button class="btn" id="stf_save">添加</button> <span class="muted2" id="stf_msg"></span></div>' +
+    '</div>';
+  document.getElementById("stf_save").onclick = async () => {
+    const username = document.getElementById("stf_user").value.trim();
+    const name = document.getElementById("stf_name").value.trim();
+    if (!username || !name) { document.getElementById("stf_msg").textContent = "请填写学号和姓名"; return; }
+    try {
+      await API.teacherAddStudent({ username, name, klass: document.getElementById("stf_class").value.trim(), major: document.getElementById("stf_major").value.trim(), course_id: c.id });
+      TeacherCache.students[c.id] = undefined;
+      host.innerHTML = ""; host._open = false;
+      toast("已添加"); renderTeacherStudents(v, c);
+    } catch (e) { document.getElementById("stf_msg").textContent = e.message; }
+  };
+}
+
+/* ---------------- Tab: 作业批改 ---------------- */
+async function renderTeacherGrading(v, c) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  let list = TeacherCache.homeworks[c.id];
+  if (!list) {
+    try {
+      list = await API.teacherHomeworks(c.id);
+      TeacherCache.homeworks[c.id] = list;
+    } catch (e) { v.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; return; }
+  }
+  v.innerHTML = "";
+  const bar = el("div", "t-toolbar");
+  const add = el("button", "btn", "＋ 布置作业");
+  add.onclick = () => toggleHomeworkForm(v, c, null);
+  bar.appendChild(add);
+  v.appendChild(bar);
+  const host = el("div"); host.id = "hwForm"; v.appendChild(host);
+
+  if (!list.length) { v.appendChild(el("div", "muted2", "本课程暂无作业，点击「布置作业」添加。")); return; }
+  list.forEach(async (hw) => {
+    const card = el("div", "t-section");
+    const top = el("div");
+    top.style.display = "flex"; top.style.justifyContent = "space-between"; top.style.alignItems = "center";
+    top.innerHTML = "<div><b>" + esc(hw.title) + "</b> <span class=\"muted2\">截止：" + esc(hw.due || "未设置") +
+      " · 提交 " + hw.submissions + " / 未批改 " + hw.ungraded + "</span></div>";
+    const right = el("div"); right.style.display = "flex"; right.style.gap = "8px";
+    const ed = el("button", "btn ghost", "编辑");
+    ed.onclick = () => toggleHomeworkForm(v, c, hw);
+    const del = el("button", "btn ghost", "删除"); del.style.color = "var(--danger)";
+    del.onclick = async () => {
+      if (!confirm("删除作业《" + hw.title + "》？相关学生提交记录将一并删除。")) return;
+      try { await API.teacherDeleteHomework(hw.id); TeacherCache.homeworks[c.id] = undefined; toast("已删除"); renderTeacherGrading(v, c); }
+      catch (e) { toast(e.message); }
+    };
+    const btn = el("button", "btn ghost", T_HW === hw.id ? "收起" : "查看提交");
+    btn.onclick = () => { T_HW = (T_HW === hw.id ? null : hw.id); renderTeacherGrading(v, c); };
+    right.appendChild(ed); right.appendChild(del); right.appendChild(btn);
+    top.appendChild(right);
+    card.appendChild(top);
+    if (T_HW === hw.id) card.appendChild(await buildSubmissionsPanel(c, hw));
+    v.appendChild(card);
+  });
+}
+
+function toggleHomeworkForm(v, c, hw) {
+  const host = document.getElementById("hwForm");
+  if (!host) return;
+  if (host._open && !hw) { host.innerHTML = ""; host._open = false; return; }
+  host._open = true;
+  const h = hw || {};
+  host.innerHTML =
+    '<div class="t-form">' +
+      '<div class="full"><label>作业标题 *</label><input id="hwf_title" value="' + esc(h.title || "") + '"></div>' +
+      '<div class="full"><label>说明 / 要求</label><textarea id="hwf_desc" rows="2">' + esc(h.desc || "") + '</textarea></div>' +
+      '<div><label>截止时间</label><input id="hwf_due" value="' + esc(h.due || "") + '" placeholder="如 2026-11-01 23:59"></div>' +
+      '<div class="full"><button class="btn" id="hwf_save">' + (hw ? "保存修改" : "布置作业") + '</button>' +
+      (hw ? '<button class="btn ghost" id="hwf_cancel">取消</button>' : "") +
+      ' <span class="muted2" id="hwf_msg"></span></div>' +
+    '</div>';
+  document.getElementById("hwf_save").onclick = async () => {
+    const title = document.getElementById("hwf_title").value.trim();
+    if (!title) { document.getElementById("hwf_msg").textContent = "请填写作业标题"; return; }
+    const body = {
+      title,
+      desc: document.getElementById("hwf_desc").value.trim(),
+      due: document.getElementById("hwf_due").value.trim(),
+    };
+    try {
+      if (hw) await API.teacherUpdateHomework(hw.id, body);
+      else await API.teacherCreateHomework(c.id, body);
+      TeacherCache.homeworks[c.id] = undefined;
+      host.innerHTML = ""; host._open = false;
+      toast(hw ? "已保存" : "已布置");
+      renderTeacherGrading(v, c);
+    } catch (e) { document.getElementById("hwf_msg").textContent = e.message; }
+  };
+  const cancel = document.getElementById("hwf_cancel");
+  if (cancel) cancel.onclick = () => { host.innerHTML = ""; host._open = false; };
+}
+
+async function buildSubmissionsPanel(c, hw) {
+  const panel = el("div"); panel.style.marginTop = "10px";
+  panel.innerHTML = '<div class="muted2">加载提交中…</div>';
+  try {
+    const subs = await API.teacherSubmissions(hw.id);
+    if (!subs.length) { panel.innerHTML = '<div class="muted2">暂无提交。</div>'; return panel; }
+    const rows = subs.map((s) => {
+      const graded = s.status === "graded";
+      const file = s.file_path ? '<a href="/files/' + esc(s.file_path) + '" target="_blank">附件</a>' : "—";
+      const act = '<button class="btn ghost" data-gd="' + s.id + '">' + (graded ? "修改批改" : "批改") + "</button>";
+      return [esc(s.username), esc(s.name), esc(s.klass || ""), esc(s.answer || "—"), file,
+        "<b>" + esc(s.score || "—") + "</b>", esc(s.feedback || "—"),
+        '<span class="badge ' + (graded ? "green" : "gray") + '">' + (graded ? "已批改" : "未批改") + "</span>", act];
+    });
+    panel.innerHTML = tTable(["学号", "姓名", "班级", "作答", "附件", "得分", "反馈", "状态", "操作"], rows);
+    panel.querySelectorAll("[data-gd]").forEach((btn) => {
+      btn.onclick = () => openGradeForm(panel, c, hw.id, +btn.getAttribute("data-gd"), subs);
+    });
+  } catch (e) { panel.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; }
+  return panel;
+}
+
+function openGradeForm(panel, c, hid, sid, subs) {
+  const sub = subs.find((x) => x.id === sid);
+  const form = el("div", "t-form");
+  form.innerHTML =
+    '<div><label>得分</label><input id="gd_score" value="' + esc(sub.score || "") + '" placeholder="如 95"></div>' +
+    '<div><label>状态</label><span class="muted2">批改后自动标记已批改</span></div>' +
+    '<div class="full"><label>反馈</label><textarea id="gd_fb" rows="2">' + esc(sub.feedback || "") + '</textarea></div>' +
+    '<div class="full"><button class="btn" id="gd_save">保存批改</button> <span class="muted2" id="gd_msg"></span></div>';
+  panel.innerHTML = "";
+  panel.appendChild(form);
+  document.getElementById("gd_save").onclick = async () => {
+    try {
+      await API.teacherGrade(hid, sid, {
+        score: document.getElementById("gd_score").value.trim(),
+        feedback: document.getElementById("gd_fb").value.trim(),
+      });
+      TeacherCache.homeworks[c.id] = undefined;
+      toast("已保存批改");
+      const body = document.querySelector(".tab-body");
+      if (body) renderTeacherGrading(body, c);
+    } catch (e) { document.getElementById("gd_msg").textContent = e.message; }
+  };
+}
+
+/* ---------------- Tab: 学情看板 ---------------- */
+async function renderTeacherDashboard(v, c) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  let d = TeacherCache.dashboard[c.id];
+  if (!d) {
+    try { d = await API.teacherDashboard(c.id); TeacherCache.dashboard[c.id] = d; }
+    catch (e) { v.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; return; }
+  }
+  v.innerHTML = "";
+  const cards = el("div", "course-grid"); cards.style.gridTemplateColumns = "repeat(auto-fill,minmax(150px,1fr))";
+  const stats = [
+    ["学生总数", d.total_students],
+    ["平均视频进度", d.avg_video + "%"],
+    ["平均作业分", d.avg_homework],
+    ["平均测验分", d.avg_quiz],
+    ["签到率", d.signin_rate + "%"],
+    ["周学习时长", Math.round((d.weekly_watch_seconds.reduce((a, b) => a + b, 0)) / 3600) + " 小时"],
+  ];
+  stats.forEach(([k, val]) => {
+    const card = el("div", "card");
+    card.style.padding = "14px";
+    card.innerHTML = '<div class="muted2">' + esc(k) + '</div><div style="font-size:22px;font-weight:800;margin-top:4px">' + esc(String(val)) + "</div>";
+    cards.appendChild(card);
+  });
+  v.appendChild(cards);
+
+  v.appendChild(el("h4", null, "学生明细"));
+  if (!d.students.length) { v.appendChild(el("div", "muted2", "暂无学生数据。")); return; }
+  const rows = d.students.map((s) => [
+    esc(s.username), esc(s.name), esc(s.klass || ""), esc(s.major || ""),
+    esc(s.video), esc(s.homework), esc(s.quiz),
+    '<span class="badge ' + (s.signed ? "green" : "gray") + '">' + (s.signed ? "已签到" : "未签到") + "</span>",
+  ]);
+  const table = el("div");
+  table.innerHTML = tTable(["学号", "姓名", "班级", "专业", "视频", "作业", "测验", "签到"], rows);
+  v.appendChild(table);
+}
+
+/* ---------------- Tab: 签到 ---------------- */
+async function renderTeacherSignin(v, c) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  let data;
+  try { data = await API.teacherSigninList(c.id); }
+  catch (e) { v.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; return; }
+  v.innerHTML = "";
+  const bar = el("div", "t-toolbar");
+  const open = el("button", "btn", "开启签到");
+  const close = el("button", "btn ghost", "关闭签到"); close.style.color = "var(--danger)";
+  const exp = el("button", "btn ghost", "导出 CSV");
+  open.onclick = async () => { try { await API.teacherSigninOpen(c.id); toast("签到已开启"); renderTeacherSignin(v, c); } catch (e) { toast(e.message); } };
+  close.onclick = async () => { try { await API.teacherSigninClose(c.id); toast("签到已关闭"); renderTeacherSignin(v, c); } catch (e) { toast(e.message); } };
+  exp.onclick = () => { try { API.teacherSigninExport(c.id); } catch (e) { toast(e.message); } };
+  bar.appendChild(open); bar.appendChild(close); bar.appendChild(exp);
+  v.appendChild(bar);
+  v.appendChild(el("div", "muted2", data.session_open ? "当前签到进行中" : "当前未开启签到"));
+
+  if (!data.students.length) { v.appendChild(el("div", "muted2", "暂无学生。")); return; }
+  const rows = data.students.map((s) => [
+    esc(s.username), esc(s.name), esc(s.klass || ""),
+    '<span class="badge ' + (s.signed ? "green" : "gray") + '">' + (s.signed ? "已签到" : "未签到") + "</span>",
+    esc(s.time || "—"),
+  ]);
+  const table = el("div");
+  table.innerHTML = tTable(["学号", "姓名", "班级", "状态", "签到时间"], rows);
+  v.appendChild(table);
+}
+
+/* ---------------- Tab: 公告 ---------------- */
+async function renderTeacherAnnouncements(v, c) {
+  v.innerHTML = '<div class="muted2">加载中…</div>';
+  let list = TeacherCache.announcements[c.id];
+  if (!list) {
+    try { list = await API.teacherAnnouncements(c.id); TeacherCache.announcements[c.id] = list; }
+    catch (e) { v.innerHTML = '<div class="card" style="color:var(--danger)">' + esc(e.message) + "</div>"; return; }
+  }
+  v.innerHTML = "";
+  const bar = el("div", "t-toolbar");
+  const add = el("button", "btn", "＋ 发布新公告");
+  add.onclick = () => toggleAnnForm(v, c, null);
+  bar.appendChild(add);
+  v.appendChild(bar);
+  const host = el("div"); host.id = "annForm"; v.appendChild(host);
+
+  if (!list.length) { v.appendChild(el("div", "muted2", "暂无公告。")); return; }
+  list.forEach((a) => {
+    const card = el("div", "t-section");
+    const top = el("div");
+    top.style.display = "flex"; top.style.justifyContent = "space-between"; top.style.alignItems = "center";
+    top.innerHTML = "<div><b>" + esc(a.title) + "</b> <span class=\"muted2\">" + esc(a.created_at || "") + "</span></div>";
+    const right = el("div"); right.style.display = "flex"; right.style.gap = "8px";
+    const ed = el("button", "btn ghost", "编辑");
+    ed.onclick = () => toggleAnnForm(v, c, a);
+    const del = el("button", "btn ghost", "删除"); del.style.color = "var(--danger)";
+    del.onclick = async () => {
+      if (!confirm("删除公告《" + a.title + "》？")) return;
+      try { await API.teacherDeleteAnnouncement(a.id); TeacherCache.announcements[c.id] = undefined; toast("已删除"); renderTeacherAnnouncements(v, c); }
+      catch (e) { toast(e.message); }
+    };
+    right.appendChild(ed); right.appendChild(del);
+    top.appendChild(right);
+    card.appendChild(top);
+    card.appendChild(el("div", null, a.content || ""));
+    v.appendChild(card);
+  });
+}
+
+function toggleAnnForm(v, c, ann) {
+  const host = document.getElementById("annForm");
+  if (!host) return;
+  if (host._open && !ann) { host.innerHTML = ""; host._open = false; return; }
+  host._open = true;
+  const a = ann || {};
+  host.innerHTML =
+    '<div class="t-form">' +
+      '<div class="full"><label>标题 *</label><input id="af_title" value="' + esc(a.title || "") + '"></div>' +
+      '<div class="full"><label>内容</label><textarea id="af_content" rows="3">' + esc(a.content || "") + '</textarea></div>' +
+      '<div class="full"><button class="btn" id="af_save">' + (ann ? "保存修改" : "发布") + '</button>' +
+      (ann ? '<button class="btn ghost" id="af_cancel">取消</button>' : "") +
+      ' <span class="muted2" id="af_msg"></span></div>' +
+    '</div>';
+  document.getElementById("af_save").onclick = async () => {
+    const title = document.getElementById("af_title").value.trim();
+    if (!title) { document.getElementById("af_msg").textContent = "请填写标题"; return; }
+    const body = { title, content: document.getElementById("af_content").value.trim() };
+    try {
+      if (ann) await API.teacherUpdateAnnouncement(ann.id, body);
+      else await API.teacherCreateAnnouncement(c.id, body);
+      TeacherCache.announcements[c.id] = undefined;
+      host.innerHTML = ""; host._open = false;
+      toast(ann ? "已保存" : "已发布");
+      renderTeacherAnnouncements(v, c);
+    } catch (e) { document.getElementById("af_msg").textContent = e.message; }
+  };
+  const cancel = document.getElementById("af_cancel");
+  if (cancel) cancel.onclick = () => { host.innerHTML = ""; host._open = false; };
+}

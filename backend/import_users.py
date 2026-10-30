@@ -31,12 +31,20 @@ def import_users(path: str):
         return
     header = [str(h).strip().lower() if h else "" for h in rows[0]]
     idx = {name: i for i, name in enumerate(header)}
-    col_user = idx.get("username")
-    col_pwd = idx.get("password")
-    col_name = idx.get("display_name") or idx.get("name")
-    col_email = idx.get("email")
+
+    def col(*names):
+        """按别名取列下标。必须用 `in` 判断：下标 0 是假值，用 `or` 会误判为缺列。"""
+        for n in names:
+            if n in idx:
+                return idx[n]
+        return None
+
+    col_user = col("username", "学号", "账号")
+    col_pwd = col("password", "密码", "初始密码")
+    col_name = col("display_name", "name", "姓名")
+    col_email = col("email", "邮箱")
     if col_user is None or col_pwd is None:
-        print("缺少必要列：username / password。请使用模板列头。")
+        print("缺少必要列：username / password（或 学号 / 密码）。请使用模板列头。")
         return
 
     db = SessionLocal()

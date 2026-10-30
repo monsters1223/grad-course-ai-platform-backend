@@ -50,7 +50,13 @@ def change_password(body: ChangePwdIn, db: Session = Depends(get_db),
         raise HTTPException(400, "原密码错误")
     if len(body.new) < 6:
         raise HTTPException(400, "新密码至少 6 位")
-    user.password_hash = hash_password(body.new)
+    if body.new == body.old:
+        raise HTTPException(400, "新密码不能与原密码相同")
+    # 在请求会话中重新取一次实体，确保写入真正落库（不依赖依赖注入返回对象的会话归属）
+    u = db.query(User).filter(User.id == user.id).first()
+    if not u:
+        raise HTTPException(404, "用户不存在")
+    u.password_hash = hash_password(body.new)
     db.commit()
     return {"ok": True}
 

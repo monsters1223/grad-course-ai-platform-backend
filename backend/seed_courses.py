@@ -12,10 +12,11 @@
 """
 from core.database import SessionLocal, Base, engine
 import models  # noqa: F401
+import json
 from sqlalchemy import text, inspect
 from models import (
     Course, Section, Discussion, Homework, ChatRoom, ChatMember,
-    StudyGroup, Message, User,
+    StudyGroup, Message, User, Question,
 )
 
 
@@ -26,6 +27,21 @@ def _migrate():
     with engine.connect() as conn:
         if "teacher_id" not in cols:
             conn.execute(text("ALTER TABLE courses ADD COLUMN teacher_id INTEGER"))
+        if "code" not in cols:
+            conn.execute(text("ALTER TABLE courses ADD COLUMN code TEXT"))
+        conn.commit()
+    # 教师端：users.class/major、submissions.feedback/graded_at/status
+    _u = [c["name"] for c in _ins.get_columns("users")]
+    with engine.connect() as conn:
+        for _col in ("class", "major"):
+            if _col not in _u:
+                conn.execute(text(f"ALTER TABLE users ADD COLUMN {_col} TEXT"))
+        conn.commit()
+    _s = [c["name"] for c in _ins.get_columns("submissions")]
+    with engine.connect() as conn:
+        for _col in ("feedback", "graded_at", "status"):
+            if _col not in _s:
+                conn.execute(text(f"ALTER TABLE submissions ADD COLUMN {_col} TEXT"))
         conn.commit()
 
 
@@ -85,7 +101,7 @@ def _sync_course_content(db):
         Section(course_id=c1.id, title="第3章课件·描述统计与可视化", stype="doc",
                 content="/files/slide3.html", position=6),
         Section(course_id=c1.id, title="章节测验1", stype="quiz",
-                content="10道单选题，涵盖第1-3章核心概念，限时20分钟。", position=7),
+                content="5道单选题，涵盖第1-3章核心概念，限时20分钟。", position=7),
     ])
     db.add(Discussion(course_id=c1.id, user_id=_first_student_id(db) or 0,
                       content="老师，第2章的方差公式能再讲一下吗？"))
@@ -116,6 +132,8 @@ def _sync_course_content(db):
                     content="/files/slide2.html", position=4),
             Section(course_id=c3.id, title="章节测验1", stype="quiz",
                     content="5道单选题，涵盖文献检索与引用规范，限时15分钟。", position=5),
+            Section(course_id=c3.id, title="章节测验2", stype="quiz",
+                    content="2道单选题，考察结论写作与引文规范，限时10分钟。", position=6),
         ])
         db.add(Discussion(course_id=c3.id, user_id=_first_student_id(db) or 0,
                           content="老师，间接引用和直接引用在正文标注上有什么区别？"))
@@ -125,6 +143,81 @@ def _sync_course_content(db):
 
     db.commit()
     print("课程内容已幂等同步：数据科学导论完整，科技伦理/学术写作为示例壳。")
+
+
+# 题库（与 data.js 原硬编码一致）：course_title -> { section_title -> [题目] }
+# 每题：(题干, [选项], 正确下标, 解析)
+_QUIZ_BANK = {
+    "数据科学导论": {
+        "章节测验1": [
+            ("数据科学的核心目标是什么？",
+             ["收集最多数据", "从数据中提取洞见并支持决策", "制作精美图表", "编写最多代码"], 1,
+             "数据科学的核心是从数据中提取洞见并支持决策。"),
+            ("EDA 是指？",
+             ["探索性数据分析", "工程数据分析", "增强数据分析", "电子数据分析"], 0,
+             "EDA = Exploratory Data Analysis，探索性数据分析。"),
+            ("过拟合的典型表现是？",
+             ["训练集差测试集差", "训练集好测试集差", "训练集差测试集好", "训练集和测试集一样差"], 1,
+             "过拟合指模型在训练集上表现好，但在新数据上表现差。"),
+            ("数据伦理不包括以下哪项？",
+             ["隐私保护", "算法公平", "数据安全", "数据越多越好"], 3,
+             "数据伦理关注隐私、公平、安全，而非单纯追求数据量。"),
+            ("特征工程的主要作用是？",
+             ["让模型更容易学习有效模式", "减少训练时间", "增加数据量", "替代模型训练"], 0,
+             "特征工程通过构造有效特征帮助模型学习。"),
+        ],
+    },
+    "学术写作与规范": {
+        "章节测验1": [
+            ("直接引用他人原话时，必须标注什么？",
+             ["作者姓名", "出版年份", "具体页码", "出版社"], 2,
+             "直接引用需要在引文后标注页码，以便读者核对原文。"),
+            ("文献综述的核心目的是什么？",
+             ["罗列尽可能多的文献", "梳理研究脉络并指出现有缺口", "直接复制摘要", "省略引用来源"], 1,
+             "文献综述重在梳理已有研究脉络，为自己的研究定位。"),
+            ("下列哪一项不属于学术不端行为？",
+             ["伪造数据", "正确引用", "一稿多投", "代写论文"], 1,
+             "正确引用是学术规范行为，其余均为学术不端。"),
+            ("论证结构的三要素是什么？",
+             ["论点、论据、论证", "引言、方法、结论", "背景、数据、致谢", "标题、摘要、关键词"], 0,
+             "论证=论点+论据+论证过程。"),
+            ("间接引用时，正文标注通常需要包含？",
+             ["仅作者", "作者与年份", "仅页码", "仅标题"], 1,
+             "间接引用需注明作者与年份，如（张三，2025）。"),
+        ],
+        "章节测验2": [
+            ("学术论文中，结论部分不应做什么？",
+             ["总结发现", "提出新观点", "重申研究意义", "建议未来方向"], 1,
+             "结论不应引入正文未讨论的新观点。"),
+            ("引文格式混乱会导致什么问题？",
+             ["影响可读性", "涉嫌抄袭", "降低可信度", "以上皆是"], 3,
+             "格式混乱会影响阅读、可信度，严重时被视为抄袭。"),
+        ],
+    },
+}
+
+
+def _sync_questions(db):
+    """幂等写入题库：按脚本定义重建各 quiz section 的题目（先删后插）。"""
+    for course_title, sections in _QUIZ_BANK.items():
+        c = db.query(Course).filter_by(title=course_title).first()
+        if not c:
+            continue
+        for section_title, items in sections.items():
+            s = db.query(Section).filter_by(
+                course_id=c.id, title=section_title, stype="quiz").first()
+            if not s:
+                continue
+            db.query(Question).filter_by(section_id=s.id).delete()
+            for order, (q_text, options, answer, explanation) in enumerate(items):
+                db.add(Question(
+                    section_id=s.id, q_order=order, q_text=q_text,
+                    options=json.dumps(options, ensure_ascii=False),
+                    answer=int(answer), explanation=explanation,
+                ))
+    db.commit()
+    total = db.query(Question).count()
+    print(f"题库已幂等同步：共 {total} 道题。")
 
 
 def _ensure_demo_teacher(db):
@@ -230,6 +323,9 @@ def seed():
 
         # ---- 幂等同步：章节/作业/讨论 ----
         _sync_course_content(db)
+
+        # ---- 幂等同步：题库（落库，答案仅服务端持有）----
+        _sync_questions(db)
 
         # ---- 内容校正（幂等，兼容旧库/外链占位）----
         _patch_content(db)
